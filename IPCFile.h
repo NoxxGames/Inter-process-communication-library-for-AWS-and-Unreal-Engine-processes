@@ -1,13 +1,40 @@
 #ifndef IPC_FILE_H
 #define IPC_FILE_H
 
+#include "stdio.h"
+#include "stdlib.h"
+
+#include <assert.h>
 #include <fstream>
 #include <string>
 #include <vector>
 
-#ifndef FORCEINLINE
-	#define FORCEINLINE __forceinline //windows
+#if defined(_WIN64) || defined(_WIN32)
+	#if !defined(FORCEINLINE)
+		#define FORCEINLINE __forceinline
+	#endif
+	#if !defined(FASTCALL)
+		#define FASTCALL __fastcall
+	#endif
+#else
+	#if !defined(FORCEINLINE)
+		#define FORCEINLINE __attribute__ ((always_inline)) 
+	#endif
+	#if !defined(FASTCALL)
+		#define FASTCALL __attribute__ ((fastcall)) 
+	#endif
 #endif
+
+#define NEWLINE_CHAR	'\n'
+#define DELIM_CHAR		','
+
+#define IPCASSERT(_CONDITION_, _ERR_STRING_) if((_CONDITION_)) { \
+	printf("\n!! "); \
+	printf((_ERR_STRING_)); \
+	printf(" !!\n"); \
+	system("pause"); \
+	exit(1); \
+}
 
 namespace IPCFile
 {
@@ -17,22 +44,36 @@ namespace IPCFile
 		STRING,
 		INT,
 		FLOAT,
+		BOOL
+	};
+
+	enum class EAttributeName : uint8_t
+	{
+		NONE,
+		PLAYER_AUTH,
+		PLAYER_NAME,
+		IS_ONLINE
 	};
 
 	template<typename T>
 	struct FAttribute
 	{
 		EAttributeTypes Type;
+		EAttributeName Name;
 		T Value;
 
 		FAttribute()
 			: Type(EAttributeTypes::NONE),
+			Name(EAttributeName::NONE),
 			Value(T())
 		{
 		}
 		
-		FAttribute(const EAttributeTypes& InType, const T& InValue)
+		FAttribute(const EAttributeTypes& InType,
+					const EAttributeName& InName,
+					const T& InValue)
 			: Type(InType),
+			Name(InName),
 			Value(InValue)
 		{
 		}
@@ -41,28 +82,49 @@ namespace IPCFile
 	typedef FAttribute<std::string> FAttributeString;
 	typedef FAttribute<int>			FAttributeInt;
 	typedef FAttribute<float>		FAttributeFloat;
+	typedef FAttribute<bool>		FAttributeBool;
 	
-	struct FTableDataStatics
+	namespace TableDataStatics
 	{
-		static constexpr int NumberOfAttributes = 2;
+		static constexpr int NumberOfAttributes = 3;
 		
-		static constexpr FAttributeString TableKeyPlayerAuthID =
-			FAttributeString(EAttributeTypes::STRING, "PlayerID");
-		static constexpr FAttributeString TableKeyPlayerName =
-			FAttributeString(EAttributeTypes::STRING, "PlayerName");
+		static const FAttributeString TableKey_PlayerAuthID =
+			FAttributeString(
+				EAttributeTypes::STRING,
+				EAttributeName::PLAYER_AUTH,
+				std::string("PlayerID"));
 		
-	};
+		static const FAttributeString TableKey_PlayerName =
+			FAttributeString(
+				EAttributeTypes::STRING,
+				EAttributeName::PLAYER_NAME,
+				std::string("PlayerName"));
+		
+		static const FAttributeBool TableKey_IsOnline =
+			FAttributeBool(
+				EAttributeTypes::BOOL,
+				EAttributeName::IS_ONLINE,
+				false);
+	}
 
+	template<uint8_t TNumberOfAttributes = 0>
 	struct FPlayerAttributeList
 	{
-		static constexpr int NumberOfAttributes = 2;
+		static_assert(TNumberOfAttributes > 0, "NumberOfAttributes cannot be zero!");
+		
+		static constexpr int NumberOfAttributes = TableDataStatics::NumberOfAttributes;
 
-		FAttributeString PlayerAuthID;
-		FAttributeString PlayerName;
+		EAttributeName Attributes[TNumberOfAttributes];
+		
+		FAttributeString	PlayerAuthID;
+		FAttributeString	PlayerName;
+		FAttributeBool		IsOnline;
 
 		FPlayerAttributeList()
-			: PlayerAuthID(),
-			PlayerName()
+			: Attributes{},
+			PlayerAuthID(),
+			PlayerName(),
+			IsOnline()
 		{
 		}
 	};
@@ -122,9 +184,8 @@ namespace IPCFile
 		{
 			// TODO
 
-			std::string* StringBuffer = GetFileData(FileName, Directory);
-
-			free(StringBuffer);
+			std::string FileText = "";
+			GetFileData(FileName, Directory, FileText);
 		}
 		
 	protected:
@@ -135,40 +196,45 @@ namespace IPCFile
 		 * \param Out String to store the output in.
 		 */
 		template<typename T>
-		static FORCEINLINE void StringifyAttribute(const FAttribute<T>& Attribute,
+		static FORCEINLINE void FASTCALL StringifyAttribute(const FAttribute<T>& Attribute,
 													std::string& Out)
 		{
 			// TODO switch on EAttributeTypes variable in FAttribute
 			// to check which type we need to convert
 		}
 		
-		static FORCEINLINE void GetSystemTimeAsString(std::string& Out)
+		static FORCEINLINE void FASTCALL GetSystemTimeAsString(std::string& Out)
 		{
 			// TODO
 		}
 
-		static FORCEINLINE void  GetSystemTime()
+		static FORCEINLINE void FASTCALL GetSystemTime()
 		{
 			// TODO
 		}
 		
 	private:
-		static FORCEINLINE std::string* GetFileData(const std::string& FileName,
-													const std::string& Directory)
+		static FORCEINLINE void FASTCALL GetFileData(const std::string& FileName,
+													 const std::string& Directory,
+													 std::string& Out)
 		{
-			std::string* StringBuffer = (std::string*)malloc(
-				sizeof(std::string));
-
-			return StringBuffer;
+			// TODO
 		}
 
-		static FORCEINLINE FPlayerAttributeList CreateAttributeList(
-												const std::string& AttributeString)
+		template<uint8_t TNumberOfAttributes = 0>
+		static FORCEINLINE FPlayerAttributeList<TNumberOfAttributes>
+			FASTCALL CreateAttributeList(const std::string& AttributeStrings)
 		{
-			return FPlayerAttributeList();
+			// TODO
+			IPCASSERT(TNumberOfAttributes == 0, "NumberOfAttributes cannot be zero! at CreateAttributeList()");
+			return FPlayerAttributeList<TNumberOfAttributes>();
 		}
 	};
 	
 }
+
+#undef TEXT
+#undef NEWLINE_CHAR
+#undef DELIM_CHAR
 
 #endif
