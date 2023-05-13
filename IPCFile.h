@@ -6,6 +6,7 @@
 
 #include <assert.h>
 #include <fstream>
+#include <queue>
 #include <string>
 #include <vector>
 
@@ -27,6 +28,9 @@
 
 #define NEWLINE_CHAR	'\n'
 #define DELIM_CHAR		','
+#define WRITE_MODE		"w"
+#define READ_MODE		"r"
+#define FILE_EXTENSION	".txt"
 
 #define IPCASSERT(_CONDITION_, _ERR_STRING_) if((_CONDITION_)) { \
 	printf("\n!! "); \
@@ -56,20 +60,21 @@ namespace IPCFile
 	};
 
 	template<typename T>
-	struct FAttribute
+	class IAttribute
 	{
+	public:
 		EAttributeTypes Type;
 		EAttributeName Name;
 		T Value;
 
-		FAttribute()
+		IAttribute()
 			: Type(EAttributeTypes::NONE),
 			Name(EAttributeName::NONE),
 			Value(T())
 		{
 		}
 		
-		FAttribute(const EAttributeTypes& InType,
+		IAttribute(const EAttributeTypes& InType,
 					const EAttributeName& InName,
 					const T& InValue)
 			: Type(InType),
@@ -79,32 +84,59 @@ namespace IPCFile
 		}
 	};
 
-	typedef FAttribute<std::string> FAttributeString;
-	typedef FAttribute<int>			FAttributeInt;
-	typedef FAttribute<float>		FAttributeFloat;
-	typedef FAttribute<bool>		FAttributeBool;
+	typedef IAttribute<std::string> IAttributeString;
+	typedef IAttribute<int>			IAttributeInt;
+	typedef IAttribute<float>		IAttributeFloat;
+	typedef IAttribute<bool>		IAttributeBool;
 	
 	namespace TableDataStatics
 	{
+		namespace Internal
+		{
+			template<typename T>
+			class IColumnAttribute : IAttribute<T>
+			{
+			public:
+				static constexpr T Key = IAttribute<T>::Value;
+
+				IColumnAttribute()
+					: IAttribute<T>()
+				{
+				}
+
+				IColumnAttribute(const EAttributeTypes& InType,
+									const EAttributeName& InName,
+									const T& InKey)
+					: IAttribute<T>(InType, InName, InKey)
+				{
+				}
+			};
+
+			typedef IColumnAttribute<std::string>	IColumnAttributeString;
+			typedef IColumnAttribute<int>			IColumnAttributeInt;
+			typedef IColumnAttribute<float>			IColumnAttributeFloat;
+			typedef IColumnAttribute<bool>			IColumnAttributeBool;
+		}
+		
 		static constexpr int NumberOfAttributes = 3;
 		
-		static const FAttributeString TableKey_PlayerAuthID =
-			FAttributeString(
+		static const Internal::IColumnAttributeString TableKey_PlayerAuthID =
+			Internal::IColumnAttributeString(
 				EAttributeTypes::STRING,
 				EAttributeName::PLAYER_AUTH,
 				std::string("PlayerID"));
 		
-		static const FAttributeString TableKey_PlayerName =
-			FAttributeString(
+		static const Internal::IColumnAttributeString TableKey_PlayerName =
+			Internal::IColumnAttributeString(
 				EAttributeTypes::STRING,
 				EAttributeName::PLAYER_NAME,
 				std::string("PlayerName"));
 		
-		static const FAttributeBool TableKey_IsOnline =
-			FAttributeBool(
+		static const Internal::IColumnAttributeString TableKey_IsOnline =
+			Internal::IColumnAttributeString(
 				EAttributeTypes::BOOL,
 				EAttributeName::IS_ONLINE,
-				false);
+				std::string("IsOnline"));
 	}
 
 	template<uint8_t TNumberOfAttributes = 0>
@@ -116,9 +148,9 @@ namespace IPCFile
 
 		EAttributeName Attributes[TNumberOfAttributes];
 		
-		FAttributeString	PlayerAuthID;
-		FAttributeString	PlayerName;
-		FAttributeBool		IsOnline;
+		IAttributeString	PlayerAuthID;
+		IAttributeString	PlayerName;
+		IAttributeBool		IsOnline;
 
 		FPlayerAttributeList()
 			: Attributes{},
@@ -140,10 +172,11 @@ namespace IPCFile
 		 * \param FileName Name of the file.
 		 * \param Directory Full directory path to put the file in.
 		 */
-		static FORCEINLINE void CreateFile(const std::string& FileName,
+		static FORCEINLINE FILE* CreateFile(const std::string& FileName,
 										   const std::string& Directory)
 		{
-			// TODO
+			const std::string FileLocation = Directory + "\\" + FileName;
+			return fopen(FileLocation.c_str(), WRITE_MODE);
 		}
 
 		/**
@@ -154,7 +187,8 @@ namespace IPCFile
 		static FORCEINLINE void DeleteFile(const std::string& FileName,
 										   const std::string& Directory)
 		{
-			// TODO
+			const std::string FileLocation = Directory + "\\" + FileName;
+			remove(FileLocation.c_str());
 		}
 
 		/**
@@ -163,11 +197,28 @@ namespace IPCFile
 		 * \param Directory Full directory path to put the file in.
 		 * \param StringArray Vector of player attribute strings to write.
 		 */
-		static FORCEINLINE void WriteToFile(const std::string& FileName,
+		static FORCEINLINE bool WriteToFile(const std::string& FileName,
 											const std::string& Directory,
-											const std::vector<std::string>& StringArray)
+											std::vector<std::string>& StringArray)
 		{
-			// TODO
+			std::string StringBuilder;
+			for(int i = 0; i < StringArray.size(); ++i)
+			{
+				StringBuilder.append(StringArray.back());
+				StringArray.pop_back();
+			}
+			
+			const std::string FileLocation =
+				Directory + "\\" + FileName + "-" + GetSystemTimeAsString() + FILE_EXTENSION;
+			FILE *File = fopen(FileLocation.c_str(), WRITE_MODE);
+			if(!File)
+			{
+				return false;
+			}
+
+			fputs(StringBuilder.c_str(), File);
+			fclose(File);
+			return true;
 		}
 
 		/**
@@ -196,16 +247,17 @@ namespace IPCFile
 		 * \param Out String to store the output in.
 		 */
 		template<typename T>
-		static FORCEINLINE void FASTCALL StringifyAttribute(const FAttribute<T>& Attribute,
+		static FORCEINLINE void FASTCALL StringifyAttribute(const IAttribute<T>& Attribute,
 													std::string& Out)
 		{
 			// TODO switch on EAttributeTypes variable in FAttribute
 			// to check which type we need to convert
 		}
 		
-		static FORCEINLINE void FASTCALL GetSystemTimeAsString(std::string& Out)
+		static FORCEINLINE std::string FASTCALL GetSystemTimeAsString()
 		{
 			// TODO
+			return "";
 		}
 
 		static FORCEINLINE void FASTCALL GetSystemTime()
@@ -230,11 +282,12 @@ namespace IPCFile
 			return FPlayerAttributeList<TNumberOfAttributes>();
 		}
 	};
-	
 }
 
-#undef TEXT
 #undef NEWLINE_CHAR
 #undef DELIM_CHAR
+#undef WRITE_MODE
+#undef READ_MODE
+#undef FILE_EXTENSION
 
 #endif
