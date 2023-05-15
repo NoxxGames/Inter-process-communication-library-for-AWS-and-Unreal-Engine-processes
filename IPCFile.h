@@ -7,8 +7,10 @@
 #include <assert.h>
 #include <fstream>
 #include <queue>
+#include <sstream>
 #include <string>
 #include <vector>
+#include <filesystem>
 
 #if defined(_WIN64) || defined(_WIN32)
 	#if !defined(FORCEINLINE)
@@ -31,6 +33,8 @@
 #define WRITE_MODE		"w"
 #define READ_MODE		"r"
 #define FILE_EXTENSION	".txt"
+
+#define ATTRIBUTE_CHAR_MAX	1024
 
 #define IPCASSERT(_CONDITION_, _ERR_STRING_) if((_CONDITION_)) { \
 	printf("\n!! "); \
@@ -224,19 +228,37 @@ namespace IPCFile
 		/**
 		 * \brief Read a list of player attribute strings from a file, stores
 		 * them in an output variable.
-		 * \param FileName Name of the file.
-		 * \param Directory Full directory path to put the file in.
+		 * \param FileLocation the location of the file (C:\\dir\\dir\\file)
 		 * \param OutStringArray Output string vector to store the player attribute
 		 * strings in.
 		 */
-		static FORCEINLINE void ReadFromFile(const std::string& FileName,
-											 const std::string& Directory,
+		static FORCEINLINE bool ReadFromFile(const std::string& FileLocation,
 											 std::vector<std::string>& OutStringArray)
 		{
-			// TODO
+			const std::ifstream File(FileLocation);
+			std::stringstream StreamBuffer;
+			StreamBuffer.set_rdbuf(File.rdbuf());
+			const std::string FileText = StreamBuffer.str();
+			if(FileText.size() == 0)
+			{
+				return false;
+			}
 
-			std::string FileText = "";
-			GetFileData(FileName, Directory, FileText);
+			std::string AttributeBuffer = "";
+			for(int i = 0; i < FileText.size(); ++i)
+			{
+				if(FileText[i] == DELIM_CHAR)
+				{
+					OutStringArray.push_back(AttributeBuffer);
+					AttributeBuffer.erase();
+				}
+				else
+				{
+					AttributeBuffer += FileText[i];
+				}
+			}
+			
+			return (OutStringArray.size() > 0);
 		}
 		
 	protected:
@@ -250,35 +272,58 @@ namespace IPCFile
 		static FORCEINLINE void FASTCALL StringifyAttribute(const IAttribute<T>& Attribute,
 													std::string& Out)
 		{
-			// TODO switch on EAttributeTypes variable in FAttribute
-			// to check which type we need to convert
+			// TODO
+			switch(Attribute.Type)
+			{
+				case EAttributeTypes::INT:
+					break;
+				case EAttributeTypes::FLOAT:
+					break;
+				case EAttributeTypes::STRING:
+					break;
+				case EAttributeTypes::BOOL:
+					break;
+				default: ;
+			}
+		}
+
+		static FORCEINLINE bool FASTCALL GetListOfFiles(const std::string& Directory,
+											 std::vector<std::string>& OutFileList)
+		{
+			if(!std::filesystem::exists(Directory))
+			{
+				return false;
+			}
+			
+			for(const auto& File :
+				std::filesystem::directory_iterator(Directory))
+			{
+				OutFileList.push_back(File.path().string());
+			}
+			return OutFileList.size() > 0;
 		}
 		
-		static FORCEINLINE std::string FASTCALL GetSystemTimeAsString()
+		static FORCEINLINE std::string FASTCALL GetSystemTimeAsString() noexcept
 		{
 			// TODO
 			return "";
 		}
 
-		static FORCEINLINE void FASTCALL GetSystemTime()
+		static FORCEINLINE void FASTCALL GetSystemTime() noexcept
 		{
 			// TODO
 		}
 		
 	private:
-		static FORCEINLINE void FASTCALL GetFileData(const std::string& FileName,
-													 const std::string& Directory,
-													 std::string& Out)
-		{
-			// TODO
-		}
-
 		template<uint8_t TNumberOfAttributes = 0>
 		static FORCEINLINE FPlayerAttributeList<TNumberOfAttributes>
 			FASTCALL CreateAttributeList(const std::string& AttributeStrings)
 		{
 			// TODO
 			IPCASSERT(TNumberOfAttributes == 0, "NumberOfAttributes cannot be zero! at CreateAttributeList()");
+
+
+
 			return FPlayerAttributeList<TNumberOfAttributes>();
 		}
 	};
@@ -289,5 +334,7 @@ namespace IPCFile
 #undef WRITE_MODE
 #undef READ_MODE
 #undef FILE_EXTENSION
+
+#undef ATTRIBUTE_CHAR_MAX
 
 #endif
