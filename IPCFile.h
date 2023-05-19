@@ -79,8 +79,8 @@ namespace IPCFile
 		}
 		
 		IAttribute(const EAttributeTypes& InType,
-					const EAttributeName& InName,
-					const T& InValue)
+			const EAttributeName& InName,
+			const T& InValue)
 			: Type(InType),
 			Name(InName),
 			Value(InValue)
@@ -102,7 +102,7 @@ namespace IPCFile
 			{
 			public:
 				static constexpr T Key = IAttribute<T>::Value;
-
+				
 				IColumnAttribute()
 					: IAttribute<T>()
 				{
@@ -142,27 +142,64 @@ namespace IPCFile
 				EAttributeName::IS_ONLINE,
 				std::string("IsOnline"));
 	}
-
-	template<uint8_t TNumberOfAttributes = 0>
-	struct FPlayerAttributeList
+	
+	class FPlayerAttributeList
 	{
-		static_assert(TNumberOfAttributes > 0, "NumberOfAttributes cannot be zero!");
+	public:
+		static constexpr int TotalNumberOfAttributes =
+			TableDataStatics::NumberOfAttributes;
 		
-		static constexpr int NumberOfAttributes = TableDataStatics::NumberOfAttributes;
-
-		EAttributeName Attributes[TNumberOfAttributes];
-		
-		IAttributeString	PlayerAuthID;
-		IAttributeString	PlayerName;
-		IAttributeBool		IsOnline;
-
 		FPlayerAttributeList()
-			: Attributes{},
+			: AttributesInUse{},
 			PlayerAuthID(),
 			PlayerName(),
 			IsOnline()
 		{
 		}
+		
+		template<typename T>
+		void AddAttribute(const IAttribute<T>& InAttribute)
+		{
+			switch (InAttribute.Name)
+			{
+				case EAttributeName::PLAYER_AUTH:
+					PlayerAuthID = InAttribute.Value;
+					break;
+				case EAttributeName::PLAYER_NAME:
+					PlayerName = InAttribute.Value;
+					break;
+				case EAttributeName::IS_ONLINE:
+					IsOnline = InAttribute.Value;
+					break;
+				case EAttributeName::NONE:
+					return;
+				default:
+					return;
+			}
+			AttributesInUse.push_back(InAttribute.Name);
+		}
+
+		IAttributeString GetPlayerAuthID() const
+		{
+			return PlayerAuthID;
+		}
+
+		IAttributeString GetPlayerName() const
+		{
+			return PlayerName;
+		}
+
+		IAttributeBool GetIsOnline() const
+		{
+			return IsOnline;
+		}
+
+	private:
+		std::vector<EAttributeName> AttributesInUse;
+		
+		IAttributeString	PlayerAuthID;
+		IAttributeString	PlayerName;
+		IAttributeBool		IsOnline;
 	};
 	
 	class IPCFileManager
@@ -176,8 +213,9 @@ namespace IPCFile
 		 * \param FileName Name of the file.
 		 * \param Directory Full directory path to put the file in.
 		 */
-		static FORCEINLINE FILE* CreateFile(const std::string& FileName,
-										   const std::string& Directory)
+		static FORCEINLINE FILE* CreateFile(
+			const std::string& FileName,
+			const std::string& Directory)
 		{
 			const std::string FileLocation = Directory + "\\" + FileName;
 			return fopen(FileLocation.c_str(), WRITE_MODE);
@@ -188,8 +226,9 @@ namespace IPCFile
 		 * \param FileName Name of the file.
 		 * \param Directory Full directory path to put the file in.
 		 */
-		static FORCEINLINE void DeleteFile(const std::string& FileName,
-										   const std::string& Directory)
+		static FORCEINLINE void DeleteFile(
+			const std::string& FileName,
+			const std::string& Directory)
 		{
 			const std::string FileLocation = Directory + "\\" + FileName;
 			remove(FileLocation.c_str());
@@ -201,9 +240,10 @@ namespace IPCFile
 		 * \param Directory Full directory path to put the file in.
 		 * \param StringArray Vector of player attribute strings to write.
 		 */
-		static FORCEINLINE bool WriteToFile(const std::string& FileName,
-											const std::string& Directory,
-											std::vector<std::string>& StringArray)
+		static FORCEINLINE bool WriteToFile(
+			const std::string& FileName,
+			const std::string& Directory,
+			std::vector<std::string>& StringArray)
 		{
 			std::string StringBuilder;
 			for(int i = 0; i < StringArray.size(); ++i)
@@ -232,8 +272,9 @@ namespace IPCFile
 		 * \param OutStringArray Output string vector to store the player attribute
 		 * strings in.
 		 */
-		static FORCEINLINE bool ReadFromFile(const std::string& FileLocation,
-											 std::vector<std::string>& OutStringArray)
+		static FORCEINLINE bool ReadLinesFromFile(
+			const std::string& FileLocation,
+			std::vector<std::string>& OutStringArray)
 		{
 			const std::ifstream File(FileLocation);
 			std::stringstream StreamBuffer;
@@ -244,21 +285,71 @@ namespace IPCFile
 				return false;
 			}
 
-			std::string AttributeBuffer = "";
+			std::string LineBuffer = "";
 			for(int i = 0; i < FileText.size(); ++i)
 			{
-				if(FileText[i] == DELIM_CHAR)
+				if(FileText[i] == NEWLINE_CHAR)
 				{
-					OutStringArray.push_back(AttributeBuffer);
-					AttributeBuffer.erase();
+					OutStringArray.push_back(LineBuffer);
+					LineBuffer.erase();
 				}
 				else
 				{
-					AttributeBuffer += FileText[i];
+					LineBuffer += FileText[i];
 				}
 			}
 			
 			return (OutStringArray.size() > 0);
+		}
+
+		static FORCEINLINE void ReadFromFileAndSplitAttributes(
+			const std::string& FileLocation,
+			std::vector<FPlayerAttributeList>& OutAttributeArray)
+		{
+			std::vector<std::string> FileLines;
+			ReadLinesFromFile(FileLocation, FileLines);
+			// Split attributes into strings
+			for(int i = 0; i < FileLines.size(); ++i)
+			{
+				const std::string Line = FileLines.back();
+				std::vector<std::string> AttributeStrings;
+				std::string AttributeBuffer = "";
+				for(int j = 0; j < Line.size(); ++j)
+				{
+					if(Line[j] == DELIM_CHAR)
+					{
+						AttributeStrings.push_back(AttributeBuffer);
+						AttributeBuffer.erase();
+					}
+					else
+					{
+						AttributeBuffer += Line[j];
+					}
+				}
+
+				// Todo put attributes into FPlayerAttributeList
+				FPlayerAttributeList PlayerAttributes;
+				for(int j = 0; j < AttributeStrings.size(); ++j)
+				{
+					if(AttributeStrings[j].find(
+						TableDataStatics::TableKey_PlayerAuthID.Key) !=
+						std::string::npos)
+					{
+						IAttributeString Buffer;
+
+						// TODO parse the value from the string and create the
+						// attribute
+						// make sure that the value itself is not the same
+						// as the PlayerAuthID.Key
+
+						PlayerAttributes.AddAttribute(Buffer);
+					}
+
+					// TODO check other attributes.... make sure to use else if
+				}
+				
+				FileLines.pop_back();
+			}
 		}
 		
 	protected:
@@ -269,8 +360,9 @@ namespace IPCFile
 		 * \param Out String to store the output in.
 		 */
 		template<typename T>
-		static FORCEINLINE void FASTCALL StringifyAttribute(const IAttribute<T>& Attribute,
-													std::string& Out)
+		static FORCEINLINE void FASTCALL StringifyAttribute(
+			const IAttribute<T>& Attribute,
+			std::string& Out)
 		{
 			// TODO
 			switch(Attribute.Type)
@@ -287,8 +379,9 @@ namespace IPCFile
 			}
 		}
 
-		static FORCEINLINE bool FASTCALL GetListOfFiles(const std::string& Directory,
-											 std::vector<std::string>& OutFileList)
+		static FORCEINLINE bool FASTCALL GetListOfFiles(
+			const std::string& Directory,
+			std::vector<std::string>& OutFileList)
 		{
 			if(!std::filesystem::exists(Directory))
 			{
@@ -314,13 +407,13 @@ namespace IPCFile
 			// TODO
 		}
 		
-	private:
 		template<uint8_t TNumberOfAttributes = 0>
 		static FORCEINLINE FPlayerAttributeList<TNumberOfAttributes>
 			FASTCALL CreateAttributeList(const std::string& AttributeStrings)
 		{
 			// TODO
-			IPCASSERT(TNumberOfAttributes == 0, "NumberOfAttributes cannot be zero! at CreateAttributeList()");
+			IPCASSERT(TNumberOfAttributes == 0,
+				"NumberOfAttributes cannot be zero! at CreateAttributeList()");
 
 
 
