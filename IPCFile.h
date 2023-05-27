@@ -1,12 +1,11 @@
 #ifndef IPC_FILE_H
 #define IPC_FILE_H
 
-#include "stdio.h"
-#include "stdlib.h"
-
-#include <assert.h>
+// C
+#include <cstdio>
+#include <cstdlib>
+// C++
 #include <fstream>
-#include <queue>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -28,21 +27,29 @@
 	#endif
 #endif
 
-#define NEWLINE_CHAR	'\n'
-#define DELIM_CHAR		','
-#define WRITE_MODE		"w"
-#define READ_MODE		"r"
-#define FILE_EXTENSION	".txt"
+#define NEWLINE_CHAR			'\n'
+#define DELIM_CHAR				','
+#define WRITE_MODE				"w"
+#define READ_MODE				"r"
+#define FILE_EXTENSION			".txt"
+#define ATTRIBUTE_DELIM_CHAR	':'
+#define TRUE_STRING				"1"
+#define FALSE_STRING			"0"
 
-#define ATTRIBUTE_CHAR_MAX	1024
+#define ATTRIBUTE_CHAR_MAX		1024
 
-#define IPCASSERT(_CONDITION_, _ERR_STRING_) if((_CONDITION_)) { \
-	printf("\n!! "); \
-	printf((_ERR_STRING_)); \
-	printf(" !!\n"); \
-	system("pause"); \
-	exit(1); \
-}
+#define IPCFILE_DEBUG_ENABLED 0
+#if IPCFILE_DEBUG_ENABLED
+	#define IPCASSERT(_CONDITION_, _ERR_STRING_) if((_CONDITION_)) { \
+		printf("\n!! "); \
+		printf((_ERR_STRING_)); \
+		printf(" !!\n"); \
+		system("pause"); \
+		exit(1); \
+	}
+#else
+	#define IPCASSERT(_CONDITION_, _ERR_STRING_)
+#endif
 
 namespace IPCFile
 {
@@ -63,6 +70,12 @@ namespace IPCFile
 		IS_ONLINE
 	};
 
+	struct FAttributeStringPair
+	{
+		std::string KeyString;
+		std::string ValueString;
+	};
+	
 	template<typename T>
 	class IAttribute
 	{
@@ -98,10 +111,10 @@ namespace IPCFile
 		namespace Internal
 		{
 			template<typename T>
-			class IColumnAttribute : IAttribute<T>
+			class IColumnAttribute : public IAttribute<T>
 			{
 			public:
-				static constexpr T Key = IAttribute<T>::Value;
+				T Key = IAttribute<T>::Value;
 				
 				IColumnAttribute()
 					: IAttribute<T>()
@@ -117,9 +130,6 @@ namespace IPCFile
 			};
 
 			typedef IColumnAttribute<std::string>	IColumnAttributeString;
-			typedef IColumnAttribute<int>			IColumnAttributeInt;
-			typedef IColumnAttribute<float>			IColumnAttributeFloat;
-			typedef IColumnAttribute<bool>			IColumnAttributeBool;
 		}
 		
 		static constexpr int NumberOfAttributes = 3;
@@ -156,45 +166,74 @@ namespace IPCFile
 			IsOnline()
 		{
 		}
-		
-		template<typename T>
-		void AddAttribute(const IAttribute<T>& InAttribute)
+
+		FORCEINLINE void SetPlayerAuthID(const IAttributeString& InPlayerAuthID)
 		{
-			switch (InAttribute.Name)
+			if(!CheckIfAttributeIsAlreadySet(InPlayerAuthID.Name))
 			{
-				case EAttributeName::PLAYER_AUTH:
-					PlayerAuthID = InAttribute.Value;
-					break;
-				case EAttributeName::PLAYER_NAME:
-					PlayerName = InAttribute.Value;
-					break;
-				case EAttributeName::IS_ONLINE:
-					IsOnline = InAttribute.Value;
-					break;
-				case EAttributeName::NONE:
-					return;
-				default:
-					return;
+				AttributesInUse.push_back(InPlayerAuthID.Name);
 			}
-			AttributesInUse.push_back(InAttribute.Name);
+			PlayerAuthID = InPlayerAuthID;
 		}
 
-		IAttributeString GetPlayerAuthID() const
+		FORCEINLINE void SetPlayerName(const IAttributeString& InPlayerName)
+		{
+			if(!CheckIfAttributeIsAlreadySet(InPlayerName.Name))
+			{
+				AttributesInUse.push_back(InPlayerName.Name);
+			}
+			PlayerName = InPlayerName;
+		}
+
+		FORCEINLINE void SetIsOnline(const IAttributeBool& InIsOnline)
+		{
+			if(!CheckIfAttributeIsAlreadySet(InIsOnline.Name))
+			{
+				AttributesInUse.push_back(InIsOnline.Name);
+			}
+			IsOnline = InIsOnline;
+		}
+
+		FORCEINLINE IAttributeString GetPlayerAuthID() const
 		{
 			return PlayerAuthID;
 		}
 
-		IAttributeString GetPlayerName() const
+		FORCEINLINE IAttributeString GetPlayerName() const
 		{
 			return PlayerName;
 		}
 
-		IAttributeBool GetIsOnline() const
+		FORCEINLINE IAttributeBool GetIsOnline() const
 		{
 			return IsOnline;
 		}
 
+		FORCEINLINE bool IsEmpty()
+		{
+			return AttributesInUse.size() == 0;
+		}
+		
 	private:
+		FORCEINLINE bool CheckIfAttributeIsAlreadySet(
+			const EAttributeName& InAttributeName)
+		{
+			if(AttributesInUse.empty())
+			{
+				return false;
+			}
+			
+			for(int i = 0; AttributesInUse.size(); ++i)
+			{
+				if(AttributesInUse[i] == InAttributeName)
+				{
+					return true;
+				}
+			}
+			
+			return false;
+		}
+		
 		std::vector<EAttributeName> AttributesInUse;
 		
 		IAttributeString	PlayerAuthID;
@@ -205,20 +244,32 @@ namespace IPCFile
 	class IPCFileManager
 	{
 	public:
+		template<typename T> using FColumnAttribute	=
+			TableDataStatics::Internal::IColumnAttribute<T>;
+		
+		inline static const FColumnAttribute<std::string> TableKey_PlayerAuthID =
+			TableDataStatics::TableKey_PlayerAuthID;
+		inline static const FColumnAttribute<std::string> TableKey_PlayerName =
+			TableDataStatics::TableKey_PlayerName;
+		inline static const FColumnAttribute<std::string> TableKey_IsOnline =
+			TableDataStatics::TableKey_IsOnline;
+		
 		IPCFileManager();
 		~IPCFileManager();
 
 		/**
 		 * \brief Create a file with a given name and location.
+		 * \param FileStream
 		 * \param FileName Name of the file.
 		 * \param Directory Full directory path to put the file in.
 		 */
-		static FORCEINLINE FILE* CreateFile(
+		static FORCEINLINE void CreateFile(
+			FILE *FileStream,
 			const std::string& FileName,
 			const std::string& Directory)
 		{
 			const std::string FileLocation = Directory + "\\" + FileName;
-			return fopen(FileLocation.c_str(), WRITE_MODE);
+			fopen_s(&FileStream, FileLocation.c_str(), WRITE_MODE);
 		}
 
 		/**
@@ -254,7 +305,8 @@ namespace IPCFile
 			
 			const std::string FileLocation =
 				Directory + "\\" + FileName + "-" + GetSystemTimeAsString() + FILE_EXTENSION;
-			FILE *File = fopen(FileLocation.c_str(), WRITE_MODE);
+			FILE *File;
+			fopen_s(&File, FileLocation.c_str(), WRITE_MODE);
 			if(!File)
 			{
 				return false;
@@ -313,41 +365,94 @@ namespace IPCFile
 			{
 				const std::string Line = FileLines.back();
 				std::vector<std::string> AttributeStrings;
-				std::string AttributeBuffer = "";
+				std::string StringBuffer = "";
 				for(int j = 0; j < Line.size(); ++j)
 				{
 					if(Line[j] == DELIM_CHAR)
 					{
-						AttributeStrings.push_back(AttributeBuffer);
-						AttributeBuffer.erase();
+						AttributeStrings.push_back(StringBuffer);
+						StringBuffer.erase();
 					}
 					else
 					{
-						AttributeBuffer += Line[j];
+						StringBuffer += Line[j];
 					}
 				}
-
-				// Todo put attributes into FPlayerAttributeList
-				FPlayerAttributeList PlayerAttributes;
+				// split each attribute into is key/value pair as strings
+				std::vector<FAttributeStringPair> SplitAttributes;
 				for(int j = 0; j < AttributeStrings.size(); ++j)
 				{
-					if(AttributeStrings[j].find(
-						TableDataStatics::TableKey_PlayerAuthID.Key) !=
-						std::string::npos)
+					FAttributeStringPair StringPairBuffer;
+					const std::string AttributeString = AttributeStrings[j];
+					const int StringSize = AttributeString.size();
+					for(int k = 0; k < StringSize; ++k)
 					{
-						IAttributeString Buffer;
+						if(AttributeString[k] == ATTRIBUTE_DELIM_CHAR)
+						{
+							// add the rest of the string after the delim char
+							// to the value string
+							for(int x = (k + 1); x < StringSize; ++x)
+							{
+								StringPairBuffer.ValueString += AttributeString[x];
+							}
+							continue;
+						}
+						// if we got here we haven't hit the delim yet, so
+						// add this char to the key string
+						StringPairBuffer.KeyString += AttributeString[k];
+					}
+					SplitAttributes.push_back(StringPairBuffer);
+				}
+				// Put attributes into FPlayerAttributeList
+				FPlayerAttributeList PlayerAttributes;
+				for(int j = 0; j < SplitAttributes.size(); ++j)
+				{
+					const FAttributeStringPair KeyValueStringPair = SplitAttributes[j];
 
-						// TODO parse the value from the string and create the
-						// attribute
-						// make sure that the value itself is not the same
-						// as the PlayerAuthID.Key
-
-						PlayerAttributes.AddAttribute(Buffer);
+					// Check if the key and value are the same...
+					if(KeyValueStringPair.KeyString == KeyValueStringPair.ValueString)
+					{
+						// TODO handle this
 					}
 
-					// TODO check other attributes.... make sure to use else if
+					switch(KeyValueStringPair.KeyString)
+					{
+						case TableKey_PlayerAuthID.Key: // Player Auth
+							{
+								const IAttributeString Buffer(
+									EAttributeTypes::STRING,
+									EAttributeName::PLAYER_AUTH,
+									KeyValueStringPair.ValueString);
+								PlayerAttributes.SetPlayerAuthID(Buffer);
+							}
+							break;
+						case TableKey_PlayerName.Key: // Player Name
+							{
+								const IAttributeString Buffer(
+									EAttributeTypes::STRING,
+									EAttributeName::PLAYER_NAME,
+									KeyValueStringPair.ValueString);
+								PlayerAttributes.SetPlayerName(Buffer);
+							}
+							break;
+						case TableKey_IsOnline.Key: // Is Online
+							{
+								const IAttributeBool Buffer(
+									EAttributeTypes::BOOL,
+									EAttributeName::IS_ONLINE,
+									(KeyValueStringPair.ValueString == TRUE_STRING));
+								PlayerAttributes.SetIsOnline(Buffer);
+							}
+							break;
+						
+						default:
+							break;
+					}
 				}
-				
+				if(!PlayerAttributes.IsEmpty())
+				{
+					OutAttributeArray.push_back(PlayerAttributes);
+				}
 				FileLines.pop_back();
 			}
 		}
@@ -406,19 +511,6 @@ namespace IPCFile
 		{
 			// TODO
 		}
-		
-		template<uint8_t TNumberOfAttributes = 0>
-		static FORCEINLINE FPlayerAttributeList<TNumberOfAttributes>
-			FASTCALL CreateAttributeList(const std::string& AttributeStrings)
-		{
-			// TODO
-			IPCASSERT(TNumberOfAttributes == 0,
-				"NumberOfAttributes cannot be zero! at CreateAttributeList()");
-
-
-
-			return FPlayerAttributeList<TNumberOfAttributes>();
-		}
 	};
 }
 
@@ -427,7 +519,13 @@ namespace IPCFile
 #undef WRITE_MODE
 #undef READ_MODE
 #undef FILE_EXTENSION
+#undef ATTRIBUTE_DELIM_CHAR
+#undef TRUE_STRING
+#undef FALSE_STRING
 
 #undef ATTRIBUTE_CHAR_MAX
+
+#undef IPCFILE_DEBUG_ENABLED
+#undef IPCASSERT
 
 #endif
