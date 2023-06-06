@@ -11,19 +11,19 @@
 #include <vector>
 #include <filesystem>
 
-#if defined(_WIN64) || defined(_WIN32)
+#if defined(_WIN64) || defined(_WIN32) // windows
 	#if !defined(FORCEINLINE)
 		#define FORCEINLINE __forceinline
 	#endif
 	#if !defined(FASTCALL)
 		#define FASTCALL __fastcall
 	#endif
-#else
+#else // linux
 	#if !defined(FORCEINLINE)
-		#define FORCEINLINE __attribute__ ((always_inline)) 
+		#define FORCEINLINE __attribute__((always_inline)) 
 	#endif
 	#if !defined(FASTCALL)
-		#define FASTCALL __attribute__ ((fastcall)) 
+		#define FASTCALL __attribute__((fastcall)) 
 	#endif
 #endif
 
@@ -35,21 +35,12 @@
 #define ATTRIBUTE_DELIM_CHAR	':'
 #define TRUE_STRING				"1"
 #define FALSE_STRING			"0"
+#define FILE_FOOTER_STRING		"\n"
 
 #define ATTRIBUTE_CHAR_MAX		1024
 
-#define IPCFILE_DEBUG_ENABLED 0
-#if IPCFILE_DEBUG_ENABLED
-	#define IPCASSERT(_CONDITION_, _ERR_STRING_) if((_CONDITION_)) { \
-		printf("\n!! "); \
-		printf((_ERR_STRING_)); \
-		printf(" !!\n"); \
-		system("pause"); \
-		exit(1); \
-	}
-#else
-	#define IPCASSERT(_CONDITION_, _ERR_STRING_)
-#endif
+#define IPC_PLATFORM_CACHE_LINE_SIZE 64
+#define IPC_ALIGN_TO_CACHE_LINE alignas(IPC_PLATFORM_CACHE_LINE_SIZE)
 
 namespace IPCFile
 {
@@ -77,7 +68,7 @@ namespace IPCFile
 	};
 	
 	template<typename T>
-	class IAttribute
+	class IPC_ALIGN_TO_CACHE_LINE IAttribute
 	{
 	public:
 		EAttributeTypes Type;
@@ -111,7 +102,7 @@ namespace IPCFile
 		namespace Internal
 		{
 			template<typename T>
-			class IColumnAttribute : public IAttribute<T>
+			class IPC_ALIGN_TO_CACHE_LINE IColumnAttribute : public IAttribute<T>
 			{
 			public:
 				T Key = IAttribute<T>::Value;
@@ -129,7 +120,7 @@ namespace IPCFile
 				}
 			};
 
-			typedef IColumnAttribute<std::string>	IColumnAttributeString;
+			typedef IColumnAttribute<std::string> IColumnAttributeString;
 		}
 		
 		static constexpr int NumberOfAttributes = 3;
@@ -153,7 +144,7 @@ namespace IPCFile
 				std::string("IsOnline"));
 	}
 	
-	class FPlayerAttributeList
+	class IPC_ALIGN_TO_CACHE_LINE FPlayerAttributeList
 	{
 	public:
 		static constexpr int TotalNumberOfAttributes =
@@ -167,6 +158,16 @@ namespace IPCFile
 		{
 		}
 
+		EAttributeName operator[](const int Index)
+		{
+			return AttributesInUse[Index];
+		}
+		
+		EAttributeName operator[](const int Index) const
+		{
+			return AttributesInUse[Index];
+		}
+		
 		FORCEINLINE void SetPlayerAuthID(const IAttributeString& InPlayerAuthID)
 		{
 			if(!CheckIfAttributeIsAlreadySet(InPlayerAuthID.Name))
@@ -194,36 +195,41 @@ namespace IPCFile
 			IsOnline = InIsOnline;
 		}
 
-		FORCEINLINE IAttributeString GetPlayerAuthID() const
+		FORCEINLINE IAttributeString GetPlayerAuthID() const noexcept
 		{
 			return PlayerAuthID;
 		}
 
-		FORCEINLINE IAttributeString GetPlayerName() const
+		FORCEINLINE IAttributeString GetPlayerName() const noexcept
 		{
 			return PlayerName;
 		}
 
-		FORCEINLINE IAttributeBool GetIsOnline() const
+		FORCEINLINE IAttributeBool GetIsOnline() const noexcept
 		{
 			return IsOnline;
 		}
 
-		FORCEINLINE bool IsEmpty()
+		FORCEINLINE bool IsEmpty() const noexcept
 		{
 			return AttributesInUse.size() == 0;
+		}
+
+		FORCEINLINE bool Size() const noexcept
+		{
+			return AttributesInUse.size();
 		}
 		
 	private:
 		FORCEINLINE bool CheckIfAttributeIsAlreadySet(
-			const EAttributeName& InAttributeName)
+			const EAttributeName& InAttributeName) const noexcept
 		{
 			if(AttributesInUse.empty())
 			{
 				return false;
 			}
 			
-			for(int i = 0; AttributesInUse.size(); ++i)
+			for(int i = 0; i < AttributesInUse.size(); ++i)
 			{
 				if(AttributesInUse[i] == InAttributeName)
 				{
@@ -241,7 +247,7 @@ namespace IPCFile
 		IAttributeBool		IsOnline;
 	};
 	
-	class IPCFileManager
+	class IPCFileManager final
 	{
 	public:
 		template<typename T> using FColumnAttribute	=
@@ -317,6 +323,96 @@ namespace IPCFile
 			return true;
 		}
 
+		static FORCEINLINE bool WriteAttributeVectorToFile(
+			const std::string& FileLocation,
+			const std::vector<FPlayerAttributeList>& InAttributeArray)
+		{
+			if(InAttributeArray.size() == 0)
+			{
+				return false;
+			}
+			
+			std::string CompleteFileString = "";
+			for(int i = 0; i < InAttributeArray.size(); ++i)
+			{
+				std::string CurrentLine = "";
+				const FPlayerAttributeList PlayerAttributes = InAttributeArray[i];
+
+				// Combine each attribute key and value into a string
+				// then append it to the line.
+				FAttributeStringPair StringPair;
+				std::string AttributeString = "";
+				for(int j = 0; j < PlayerAttributes.Size(); ++j)
+				{
+					if(PlayerAttributes[j] == TableKey_PlayerAuthID.Name)
+					{
+						StringPair.KeyString = TableKey_PlayerAuthID.Key;
+						StringPair.ValueString = PlayerAttributes.GetPlayerAuthID().Value;
+					}
+					else if(PlayerAttributes[j] == TableKey_PlayerName.Name)
+					{
+						StringPair.KeyString = TableKey_PlayerName.Key;
+						StringPair.ValueString = PlayerAttributes.GetPlayerName().Value;
+					}
+					else if(PlayerAttributes[j] == TableKey_IsOnline.Name)
+					{
+						StringPair.KeyString = TableKey_IsOnline.Key;
+						StringPair.ValueString =
+							(PlayerAttributes.GetIsOnline().Value) ?
+								(TRUE_STRING) : (FALSE_STRING);
+					}
+
+					AttributeString = StringPair.KeyString +
+						ATTRIBUTE_DELIM_CHAR + StringPair.ValueString + DELIM_CHAR;
+					CurrentLine.append(AttributeString);
+				}
+
+				CurrentLine += NEWLINE_CHAR; // add the newline char onto the end
+				CompleteFileString.append(CurrentLine); // add the line to the file text
+			}
+			CompleteFileString.append(FILE_FOOTER_STRING); // add the footer
+
+			// write the data to the file
+			FILE *File;
+			fopen_s(&File, FileLocation.c_str(), WRITE_MODE);
+			if(!File)
+			{
+				return false;
+			}
+			fputs(CompleteFileString.c_str(), File);
+			fclose(File);
+			return true;
+		}
+
+		static FORCEINLINE void ReadFromFileAndGetAttributes(
+			const std::string& FileLocation,
+			std::vector<FPlayerAttributeList>& OutAttributeVector)
+		{
+			std::vector<std::string> FileLines;
+			ReadLinesFromFile(FileLocation, FileLines);
+			// Split attributes into strings
+			for(int i = 0; i < FileLines.size(); ++i)
+			{
+				// Split the line into attributes
+				const std::string LineString = FileLines[i];
+				std::vector<std::string> AttributeStrings;
+				SplitLineIntoAttributeStrings(LineString, AttributeStrings);
+				// Split each attribute into is key/value pair as stringss
+				std::vector<FAttributeStringPair> SplitAttributes;
+				SplitAttributeStrings(AttributeStrings, SplitAttributes);
+				// Put attributes into FPlayerAttributeList
+				FPlayerAttributeList PlayerAttributes;
+				ConvertSplitAttributesToPlayerAttributes(SplitAttributes, PlayerAttributes);
+				// Make sure there was actually something to update
+				if(!PlayerAttributes.IsEmpty())
+				{
+					// Push the now assembled FPlayerAttributeList into the vector
+					OutAttributeVector.push_back(PlayerAttributes);
+				}
+			}
+		}
+
+	protected:
 		/**
 		 * \brief Read a list of player attribute strings from a file, stores
 		 * them in an output variable.
@@ -330,7 +426,7 @@ namespace IPCFile
 		{
 			const std::ifstream File(FileLocation);
 			std::stringstream StreamBuffer;
-			StreamBuffer.set_rdbuf(File.rdbuf());
+			StreamBuffer << File.rdbuf();
 			const std::string FileText = StreamBuffer.str();
 			if(FileText.size() == 0)
 			{
@@ -354,110 +450,100 @@ namespace IPCFile
 			return (OutStringArray.size() > 0);
 		}
 
-		static FORCEINLINE void ReadFromFileAndSplitAttributes(
-			const std::string& FileLocation,
-			std::vector<FPlayerAttributeList>& OutAttributeArray)
+		static FORCEINLINE void SplitLineIntoAttributeStrings(
+			const std::string& LineString,
+			std::vector<std::string> AttributeStrings
+			)
 		{
-			std::vector<std::string> FileLines;
-			ReadLinesFromFile(FileLocation, FileLines);
-			// Split attributes into strings
-			for(int i = 0; i < FileLines.size(); ++i)
+			std::string StringBuffer = "";
+			for(int i = 0; i < LineString.size(); ++i)
 			{
-				const std::string Line = FileLines.back();
-				std::vector<std::string> AttributeStrings;
-				std::string StringBuffer = "";
-				for(int j = 0; j < Line.size(); ++j)
+				if(LineString[i] == DELIM_CHAR)
 				{
-					if(Line[j] == DELIM_CHAR)
-					{
-						AttributeStrings.push_back(StringBuffer);
-						StringBuffer.erase();
-					}
-					else
-					{
-						StringBuffer += Line[j];
-					}
+					AttributeStrings.push_back(StringBuffer);
+					StringBuffer.erase();
 				}
-				// split each attribute into is key/value pair as strings
-				std::vector<FAttributeStringPair> SplitAttributes;
-				for(int j = 0; j < AttributeStrings.size(); ++j)
+				else
 				{
-					FAttributeStringPair StringPairBuffer;
-					const std::string AttributeString = AttributeStrings[j];
-					const int StringSize = AttributeString.size();
-					for(int k = 0; k < StringSize; ++k)
+					StringBuffer += LineString[i];
+				}
+			}
+		}
+
+		static FORCEINLINE void SplitAttributeStrings(
+			const std::vector<std::string>& AttributeStrings,
+			std::vector<FAttributeStringPair>& SplitAttributes)
+		{
+			for(int i = 0; i < AttributeStrings.size(); ++i)
+			{
+				FAttributeStringPair StringPairBuffer;
+				const std::string AttributeString = AttributeStrings[i];
+				const size_t StringSize = AttributeString.size();
+				for(int j = 0; j < StringSize; ++j)
+				{
+					if(AttributeString[j] == ATTRIBUTE_DELIM_CHAR)
 					{
-						if(AttributeString[k] == ATTRIBUTE_DELIM_CHAR)
+						for(int k = 0; k < j; ++k)
 						{
-							// add the rest of the string after the delim char
-							// to the value string
-							for(int x = (k + 1); x < StringSize; ++x)
-							{
-								StringPairBuffer.ValueString += AttributeString[x];
-							}
-							continue;
+							StringPairBuffer.KeyString += AttributeString[k];
 						}
-						// if we got here we haven't hit the delim yet, so
-						// add this char to the key string
-						StringPairBuffer.KeyString += AttributeString[k];
+							
+						// add the rest of the string after the delim char
+						// to the value string
+						for(int k = (j + 1); k < StringSize; ++k)
+						{
+							StringPairBuffer.ValueString += AttributeString[k];
+						}
 					}
-					SplitAttributes.push_back(StringPairBuffer);
 				}
-				// Put attributes into FPlayerAttributeList
-				FPlayerAttributeList PlayerAttributes;
-				for(int j = 0; j < SplitAttributes.size(); ++j)
-				{
-					const FAttributeStringPair KeyValueStringPair = SplitAttributes[j];
+				SplitAttributes.push_back(StringPairBuffer);
+			}
+		}
 
-					// Check if the key and value are the same...
-					if(KeyValueStringPair.KeyString == KeyValueStringPair.ValueString)
-					{
-						// TODO handle this
-					}
+		static FORCEINLINE void ConvertSplitAttributesToPlayerAttributes(
+			const std::vector<FAttributeStringPair>& SplitAttributes,
+			FPlayerAttributeList& PlayerAttributes)
+		{
+			for(int i = 0; i < SplitAttributes.size(); ++i)
+			{
+				const FAttributeStringPair KeyValueStringPair = SplitAttributes[i];
 
-					switch(KeyValueStringPair.KeyString)
-					{
-						case TableKey_PlayerAuthID.Key: // Player Auth
-							{
-								const IAttributeString Buffer(
-									EAttributeTypes::STRING,
-									EAttributeName::PLAYER_AUTH,
-									KeyValueStringPair.ValueString);
-								PlayerAttributes.SetPlayerAuthID(Buffer);
-							}
-							break;
-						case TableKey_PlayerName.Key: // Player Name
-							{
-								const IAttributeString Buffer(
-									EAttributeTypes::STRING,
-									EAttributeName::PLAYER_NAME,
-									KeyValueStringPair.ValueString);
-								PlayerAttributes.SetPlayerName(Buffer);
-							}
-							break;
-						case TableKey_IsOnline.Key: // Is Online
-							{
-								const IAttributeBool Buffer(
-									EAttributeTypes::BOOL,
-									EAttributeName::IS_ONLINE,
-									(KeyValueStringPair.ValueString == TRUE_STRING));
-								PlayerAttributes.SetIsOnline(Buffer);
-							}
-							break;
-						
-						default:
-							break;
-					}
-				}
-				if(!PlayerAttributes.IsEmpty())
+				// Check if the key and value are the same...
+				if(KeyValueStringPair.KeyString == KeyValueStringPair.ValueString)
 				{
-					OutAttributeArray.push_back(PlayerAttributes);
+					// TODO handle this
 				}
-				FileLines.pop_back();
+
+				// Check to see which attribute it is, then add it the list
+				// NOTE: Can't use a switch here because we're just checking
+				// equality on strings
+				if(KeyValueStringPair.KeyString == TableKey_PlayerAuthID.Key)
+				{
+					const IAttributeString Buffer(
+						EAttributeTypes::STRING,
+						EAttributeName::PLAYER_AUTH,
+						KeyValueStringPair.ValueString);
+					PlayerAttributes.SetPlayerAuthID(Buffer);
+				}
+				else if(KeyValueStringPair.KeyString == TableKey_PlayerName.Key)
+				{
+					const IAttributeString Buffer(
+						EAttributeTypes::STRING,
+						EAttributeName::PLAYER_NAME,
+						KeyValueStringPair.ValueString);
+					PlayerAttributes.SetPlayerName(Buffer);
+				}
+				else if(KeyValueStringPair.KeyString == TableKey_IsOnline.Key)
+				{
+					const IAttributeBool Buffer(
+						EAttributeTypes::BOOL,
+						EAttributeName::IS_ONLINE,
+						(KeyValueStringPair.ValueString == TRUE_STRING));
+					PlayerAttributes.SetIsOnline(Buffer);
+				}
 			}
 		}
 		
-	protected:
 		/**
 		 * \brief Convert the value of an attribute to a string.
 		 * \tparam T Template type for the attribute type.
@@ -525,7 +611,7 @@ namespace IPCFile
 
 #undef ATTRIBUTE_CHAR_MAX
 
-#undef IPCFILE_DEBUG_ENABLED
-#undef IPCASSERT
+#undef IPC_PLATFORM_CACHE_LINE_SIZE
+#undef IPC_ALIGN_TO_CACHE_LINE
 
 #endif
