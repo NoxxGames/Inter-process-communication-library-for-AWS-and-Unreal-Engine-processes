@@ -31,16 +31,16 @@
 #define DELIM_CHAR				','
 #define WRITE_MODE				"w"
 #define READ_MODE				"r"
-#define FILE_EXTENSION			".txt"
+#define FILE_EXTENSION			".ipcf"
 #define ATTRIBUTE_DELIM_CHAR	':'
 #define TRUE_STRING				"1"
 #define FALSE_STRING			"0"
-#define FILE_FOOTER_STRING		"\n"
+#define FILE_FOOTER_STRING		"EOF"
 
 #define ATTRIBUTE_CHAR_MAX		1024
 
-#define IPC_PLATFORM_CACHE_LINE_SIZE 64
-#define IPC_ALIGN_TO_CACHE_LINE alignas(IPC_PLATFORM_CACHE_LINE_SIZE)
+#define IPC_PLATFORM_CACHE_LINE_SIZE	64
+#define IPC_ALIGN_TO_CACHE_LINE			alignas(IPC_PLATFORM_CACHE_LINE_SIZE)
 
 namespace IPCFile
 {
@@ -60,7 +60,7 @@ namespace IPCFile
 		PLAYER_NAME,
 		IS_ONLINE
 	};
-
+	
 	struct FAttributeStringPair
 	{
 		std::string KeyString;
@@ -70,6 +70,8 @@ namespace IPCFile
 	template<typename T>
 	class IPC_ALIGN_TO_CACHE_LINE IAttribute
 	{
+		// TODO: add static_asserts on constructibility of template T
+		
 	public:
 		EAttributeTypes Type;
 		EAttributeName Name;
@@ -158,7 +160,7 @@ namespace IPCFile
 		{
 		}
 
-		EAttributeName operator[](const int Index)
+		EAttributeName& operator[](const int Index)
 		{
 			return AttributesInUse[Index];
 		}
@@ -310,7 +312,8 @@ namespace IPCFile
 			}
 			
 			const std::string FileLocation =
-				Directory + "\\" + FileName + "-" + GetSystemTimeAsString() + FILE_EXTENSION;
+				Directory + "\\" + FileName + "-" +
+					GetSystemTimeAsString() + FILE_EXTENSION;
 			FILE *File;
 			fopen_s(&File, FileLocation.c_str(), WRITE_MODE);
 			if(!File)
@@ -336,7 +339,8 @@ namespace IPCFile
 			for(int i = 0; i < InAttributeArray.size(); ++i)
 			{
 				std::string CurrentLine = "";
-				const FPlayerAttributeList PlayerAttributes = InAttributeArray[i];
+				const FPlayerAttributeList PlayerAttributes =
+					InAttributeArray[i];
 
 				// Combine each attribute key and value into a string
 				// then append it to the line.
@@ -347,12 +351,14 @@ namespace IPCFile
 					if(PlayerAttributes[j] == TableKey_PlayerAuthID.Name)
 					{
 						StringPair.KeyString = TableKey_PlayerAuthID.Key;
-						StringPair.ValueString = PlayerAttributes.GetPlayerAuthID().Value;
+						StringPair.ValueString =
+							PlayerAttributes.GetPlayerAuthID().Value;
 					}
 					else if(PlayerAttributes[j] == TableKey_PlayerName.Name)
 					{
 						StringPair.KeyString = TableKey_PlayerName.Key;
-						StringPair.ValueString = PlayerAttributes.GetPlayerName().Value;
+						StringPair.ValueString =
+							PlayerAttributes.GetPlayerName().Value;
 					}
 					else if(PlayerAttributes[j] == TableKey_IsOnline.Name)
 					{
@@ -402,7 +408,8 @@ namespace IPCFile
 				SplitAttributeStrings(AttributeStrings, SplitAttributes);
 				// Put attributes into FPlayerAttributeList
 				FPlayerAttributeList PlayerAttributes;
-				ConvertSplitAttributesToPlayerAttributes(SplitAttributes, PlayerAttributes);
+				ConvertSplitAttributesToPlayerAttributes(
+					SplitAttributes, PlayerAttributes);
 				// Make sure there was actually something to update
 				if(!PlayerAttributes.IsEmpty())
 				{
@@ -426,7 +433,7 @@ namespace IPCFile
 		{
 			const std::ifstream File(FileLocation);
 			std::stringstream StreamBuffer;
-			StreamBuffer << File.rdbuf();
+			StreamBuffer << File.rdbuf(); // hate doing this
 			const std::string FileText = StreamBuffer.str();
 			if(FileText.size() == 0)
 			{
@@ -452,7 +459,7 @@ namespace IPCFile
 
 		static FORCEINLINE void SplitLineIntoAttributeStrings(
 			const std::string& LineString,
-			std::vector<std::string> AttributeStrings
+			std::vector<std::string>& AttributeStrings
 			)
 		{
 			std::string StringBuffer = "";
@@ -506,10 +513,12 @@ namespace IPCFile
 		{
 			for(int i = 0; i < SplitAttributes.size(); ++i)
 			{
-				const FAttributeStringPair KeyValueStringPair = SplitAttributes[i];
+				const FAttributeStringPair KeyValueStringPair =
+					SplitAttributes[i];
 
 				// Check if the key and value are the same...
-				if(KeyValueStringPair.KeyString == KeyValueStringPair.ValueString)
+				if(KeyValueStringPair.KeyString ==
+					KeyValueStringPair.ValueString)
 				{
 					// TODO handle this
 				}
