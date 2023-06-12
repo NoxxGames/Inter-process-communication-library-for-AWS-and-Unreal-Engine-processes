@@ -217,7 +217,7 @@ namespace IPCFile
 			return AttributesInUse.size() == 0;
 		}
 
-		FORCEINLINE bool Size() const noexcept
+		FORCEINLINE size_t Size() const noexcept
 		{
 			return AttributesInUse.size();
 		}
@@ -262,8 +262,8 @@ namespace IPCFile
 		inline static const FColumnAttribute<std::string> TableKey_IsOnline =
 			TableDataStatics::TableKey_IsOnline;
 		
-		IPCFileManager();
-		~IPCFileManager();
+		IPCFileManager() = default;
+		~IPCFileManager() = default;
 
 		/**
 		 * \brief Create a file with a given name and location.
@@ -291,39 +291,6 @@ namespace IPCFile
 		{
 			const std::string FileLocation = Directory + "\\" + FileName;
 			remove(FileLocation.c_str());
-		}
-
-		/**
-		 * \brief Write a list of player attribute strings to a certain file.
-		 * \param FileName Name of the file.
-		 * \param Directory Full directory path to put the file in.
-		 * \param StringArray Vector of player attribute strings to write.
-		 */
-		static FORCEINLINE bool WriteToFile(
-			const std::string& FileName,
-			const std::string& Directory,
-			std::vector<std::string>& StringArray)
-		{
-			std::string StringBuilder;
-			for(int i = 0; i < StringArray.size(); ++i)
-			{
-				StringBuilder.append(StringArray.back());
-				StringArray.pop_back();
-			}
-			
-			const std::string FileLocation =
-				Directory + "\\" + FileName + "-" +
-					GetSystemTimeAsString() + FILE_EXTENSION;
-			FILE *File;
-			fopen_s(&File, FileLocation.c_str(), WRITE_MODE);
-			if(!File)
-			{
-				return false;
-			}
-
-			fputs(StringBuilder.c_str(), File);
-			fclose(File);
-			return true;
 		}
 
 		static FORCEINLINE bool WriteAttributeVectorToFile(
@@ -419,7 +386,7 @@ namespace IPCFile
 			}
 		}
 
-	protected:
+	private:
 		/**
 		 * \brief Read a list of player attribute strings from a file, stores
 		 * them in an output variable.
