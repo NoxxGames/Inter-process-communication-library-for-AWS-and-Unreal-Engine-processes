@@ -37,6 +37,10 @@
 #define FALSE_STRING			"0"
 #define FILE_FOOTER_STRING		"EOF"
 
+#define GET_REQUEST_STRING		"GET"
+#define SET_REQUEST_STRING		"SET"
+#define FILE_DELIM_CHAR			"#"
+
 #define ATTRIBUTE_CHAR_MAX		1024
 
 #define IPC_PLATFORM_CACHE_LINE_SIZE	64
@@ -59,6 +63,30 @@ namespace IPCFile
 		PLAYER_AUTH,
 		PLAYER_NAME,
 		IS_ONLINE
+	};
+
+	enum class ERequestType : uint8_t
+	{
+		GET,
+		SET
+	};
+
+	struct FToken
+	{
+		FToken()
+			: Token(Incrementor.fetch_add(1, std::memory_order_seq_cst))
+		{
+		}
+		
+		FORCEINLINE uint64_t ResetSetToken()
+		{
+			Token = Incrementor.fetch_add(1, std::memory_order_seq_cst);
+			return Token;
+		}
+
+	private:
+		uint64_t Token;
+		inline static std::atomic<uint64_t> Incrementor = {0};
 	};
 	
 	struct FAttributeStringPair
@@ -293,6 +321,16 @@ namespace IPCFile
 			remove(FileLocation.c_str());
 		}
 
+
+		/* TODO: Create functions for getting data,
+		 * they will need a new type used to simply list
+		 * what attributes are desired..
+		 *
+		 * Also.. both the getter & setter functions will also need some
+		 * sort of id token, one for the transaction itself, the other
+		 * will be used to id the player invoking the request
+		 */
+		
 		static FORCEINLINE bool WriteAttributeVectorToFile(
 			const std::string& FileLocation,
 			const std::vector<FPlayerAttributeList>& InAttributeArray)
@@ -345,9 +383,14 @@ namespace IPCFile
 			}
 			CompleteFileString.append(FILE_FOOTER_STRING); // add the footer
 
+			// Generate a unique name for this set request file
+			std::string UniqueFileName;
+			GeneratorUniqueFileName(UniqueFileName, ERequestType::SET);
+			const std::string FullPath = FileLocation + UniqueFileName;
+			
 			// write the data to the file
 			FILE *File;
-			fopen_s(&File, FileLocation.c_str(), WRITE_MODE);
+			fopen_s(&File, FullPath.c_str(), WRITE_MODE);
 			if(!File)
 			{
 				return false;
@@ -562,6 +605,18 @@ namespace IPCFile
 			}
 			return OutFileList.size() > 0;
 		}
+
+		static FORCEINLINE void GeneratorUniqueFileName(std::string& Out,
+			const ERequestType& RequestType)
+		{
+			const uint64_t UniqueID = FileNameIncrementor.fetch_add(1,
+				std::memory_order_seq_cst);
+			const std::string UniqueIDString = std::to_string(UniqueID);
+			const std::string RequestTypeString = (RequestType == ERequestType::GET) ?
+				(GET_REQUEST_STRING) : (SET_REQUEST_STRING);
+			// Output the file name
+			Out = RequestTypeString + FILE_DELIM_CHAR + UniqueIDString;
+		}
 		
 		static FORCEINLINE std::string FASTCALL GetSystemTimeAsString() noexcept
 		{
@@ -573,6 +628,9 @@ namespace IPCFile
 		{
 			// TODO
 		}
+
+	private:
+		inline static std::atomic<uint64_t> FileNameIncrementor; 
 	};
 }
 
@@ -584,6 +642,10 @@ namespace IPCFile
 #undef ATTRIBUTE_DELIM_CHAR
 #undef TRUE_STRING
 #undef FALSE_STRING
+
+#undef GET_REQUEST_STRING		
+#undef SET_REQUEST_STRING		
+#undef FILE_DELIM_CHAR			
 
 #undef ATTRIBUTE_CHAR_MAX
 
