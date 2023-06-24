@@ -10,20 +10,15 @@
 #include <string>
 #include <vector>
 #include <filesystem>
+#include <thread>
 
 #if defined(_WIN64) || defined(_WIN32) // windows
 	#if !defined(FORCEINLINE)
 		#define FORCEINLINE __forceinline
 	#endif
-	#if !defined(FASTCALL)
-		#define FASTCALL __fastcall
-	#endif
 #else // linux
 	#if !defined(FORCEINLINE)
 		#define FORCEINLINE __attribute__((always_inline)) 
-	#endif
-	#if !defined(FASTCALL)
-		#define FASTCALL __attribute__((fastcall)) 
 	#endif
 #endif
 
@@ -38,10 +33,18 @@
 #define FILE_FOOTER_STRING		"EOF"
 
 #define GET_REQUEST_STRING		"GET"
+#define GET_RESPONSE_REQUEST_STRING		"GETRESPONSE"
 #define SET_REQUEST_STRING		"SET"
-#define FILE_DELIM_CHAR			"#"
+#define FILE_DELIM_CHAR			'#'
+#define FILE_TIME_DELIM_CHAR	'-'
 
 #define ATTRIBUTE_CHAR_MAX		1024
+
+#define UE_BUFFER_MAX			524288
+#define AWS_BUFFER_MAX			524288
+
+#define UE_BUFFER_TICK_RATE		128
+#define AWS_BUFFER_TICK_RATE	128
 
 #define IPC_PLATFORM_CACHE_LINE_SIZE	64
 #define IPC_ALIGN_TO_CACHE_LINE			alignas(IPC_PLATFORM_CACHE_LINE_SIZE)
@@ -68,6 +71,7 @@ namespace IPCFile
 	enum class ERequestType : uint8_t
 	{
 		GET,
+		GET_RESPONSE,
 		SET
 	};
 
@@ -78,7 +82,7 @@ namespace IPCFile
 		{
 		}
 		
-		FORCEINLINE uint64_t ResetSetToken()
+		FORCEINLINE uint64_t GenerateNewToken()
 		{
 			Token = Incrementor.fetch_add(1, std::memory_order_seq_cst);
 			return Token;
@@ -132,7 +136,7 @@ namespace IPCFile
 		namespace Internal
 		{
 			template<typename T>
-			class IPC_ALIGN_TO_CACHE_LINE IColumnAttribute : public IAttribute<T>
+			class IPC_ALIGN_TO_CACHE_LINE IColumnAttribute final : public IAttribute<T>
 			{
 			public:
 				T Key = IAttribute<T>::Value;
@@ -174,7 +178,7 @@ namespace IPCFile
 				std::string("IsOnline"));
 	}
 	
-	class IPC_ALIGN_TO_CACHE_LINE FPlayerAttributeList
+	class IPC_ALIGN_TO_CACHE_LINE FPlayerAttributeList final
 	{
 	public:
 		static constexpr int TotalNumberOfAttributes =
@@ -269,16 +273,252 @@ namespace IPCFile
 			
 			return false;
 		}
-		
+
+	private:
 		std::vector<EAttributeName> AttributesInUse;
 		
 		IAttributeString	PlayerAuthID;
 		IAttributeString	PlayerName;
 		IAttributeBool		IsOnline;
 	};
-	
-	class IPCFileManager final
+
+	class IPC_ALIGN_TO_CACHE_LINE FIPCRequest
 	{
+	public:
+		static constexpr int TotalNumberOfAttributes =
+			TableDataStatics::NumberOfAttributes;
+
+		FIPCRequest(const IAttributeString& InPlayerAuthID)
+			: PlayerAuthID(InPlayerAuthID)
+		{
+		}
+
+		virtual ~FIPCRequest() = default;
+		
+		virtual FORCEINLINE IAttributeString GetPlayerAuthID() const noexcept
+		{
+			return PlayerAuthID;
+		}
+		
+		virtual FORCEINLINE std::string GetPlayerAuthIDString() const noexcept
+		{
+			return PlayerAuthID.Value;
+		}
+
+		virtual FORCEINLINE bool IsEmpty() const = delete;
+		virtual FORCEINLINE size_t Size() const = delete;
+		
+	protected:
+		const IAttributeString PlayerAuthID;
+	};
+
+	/*
+	 * GetRequest
+	 */
+	class IPC_ALIGN_TO_CACHE_LINE FGetRequest final : public FIPCRequest
+	{
+	public:
+		FGetRequest(const IAttributeString& InPlayerAuthID)
+			: FIPCRequest(InPlayerAuthID),
+			AttributesToGet{}
+		{
+		}
+
+		FGetRequest(
+			const IAttributeString& InPlayerAuthID,
+			std::vector<EAttributeName>& InAttributesToGet)
+				: FIPCRequest(InPlayerAuthID),
+				AttributesToGet(std::move(InAttributesToGet))
+		{
+		}
+
+		EAttributeName& operator[](const int Index)
+		{
+			return AttributesToGet[Index];
+		}
+		
+		EAttributeName operator[](const int Index) const
+		{
+			return AttributesToGet[Index];
+		}
+
+		FORCEINLINE bool AddAttributeToGet(const EAttributeName& InAttributeName)
+		{
+			if(CheckIfAttributeIsAlreadySet(InAttributeName))
+			{
+				return false;
+			}
+
+			AttributesToGet.push_back(InAttributeName);
+			return true;
+		}
+
+		virtual FORCEINLINE bool IsEmpty() const noexcept override
+		{
+			return Size() == 0;
+		}
+
+		virtual FORCEINLINE size_t Size() const noexcept override
+		{
+			return AttributesToGet.size();
+		}
+		
+	private:
+		FORCEINLINE bool CheckIfAttributeIsAlreadySet(
+			const EAttributeName& InAttributeName) const noexcept
+		{
+			if(AttributesToGet.empty() ||
+				InAttributeName == TableDataStatics::TableKey_PlayerAuthID.Name)
+			{
+				return false;
+			}
+			
+			for(int i = 0; i < AttributesToGet.size(); ++i)
+			{
+				if(AttributesToGet[i] == InAttributeName)
+				{
+					return true;
+				}
+			}
+			
+			return false;
+		}
+		
+	private:
+		std::vector<EAttributeName> AttributesToGet;
+	};
+
+	/*
+	 * SetRequest
+	 */
+	class IPC_ALIGN_TO_CACHE_LINE FSetRequest final : public FIPCRequest
+	{
+	public:
+		FSetRequest() = delete;
+		FSetRequest(
+			const IAttributeString& InPlayerAuthID,
+			const FPlayerAttributeList& InPlayerAttributes)
+				: FIPCRequest(InPlayerAuthID),
+				PlayerAttributes(InPlayerAttributes)
+		{
+		}
+
+		FORCEINLINE const FPlayerAttributeList* GetPlayerAttributeList() const
+		{
+			return &PlayerAttributes;
+		}
+		
+		virtual FORCEINLINE bool IsEmpty() const noexcept override
+		{
+			return Size() == 0;
+		}
+
+		virtual FORCEINLINE size_t Size() const noexcept override
+		{
+			return PlayerAttributes.Size();
+		}
+		
+	private:
+		const FPlayerAttributeList PlayerAttributes;
+	};
+
+	/*
+	 * IPCFileManager main static class
+	 */
+	class IPC_ALIGN_TO_CACHE_LINE IPCFileManager final
+	{
+		static constexpr int UE_BufferTickRateMS = 1000 / UE_BUFFER_TICK_RATE;
+		static constexpr int AWS_BufferTickRateMS = 1000 / AWS_BUFFER_TICK_RATE;
+
+		template<typename T>
+		class IPC_ALIGN_TO_CACHE_LINE FRequestBuffer
+		{
+		public:
+			FRequestBuffer() = default;
+
+			// TODO
+		protected:
+			std::vector<T> RequestBuffer;
+		};
+
+		class IPC_ALIGN_TO_CACHE_LINE FGetRequestBuffer
+			: public FRequestBuffer<FGetRequest>
+		{
+		public:
+			FGetRequestBuffer()
+				: FRequestBuffer()
+			{
+			}
+
+			// TODO
+		};
+
+		class IPC_ALIGN_TO_CACHE_LINE FSetRequestBuffer
+			: public FRequestBuffer<FSetRequest>
+		{
+		public:
+			FSetRequestBuffer()
+				: FRequestBuffer()
+			{
+			}
+
+			// TODO
+		};
+		
+		template<int TTickRate = UE_BufferTickRateMS>
+		class IPC_ALIGN_TO_CACHE_LINE FBufferThread
+		{
+		public:
+			FBufferThread()
+				: IsRunning{false},
+				ShouldStop{false}
+			{
+			}
+			
+			FORCEINLINE void StartThread()
+			{
+				if(IsRunning.load())
+				{
+					return;
+				}
+
+				std::thread([=] ()
+				{
+					IsRunning.store(true, std::memory_order_release);
+					for(;;)
+					{
+						if(ShouldStop.load(std::memory_order_acquire))
+						{
+							break;
+						}
+
+						// TODO process buffer elements, will need a way
+						// of checking which buffer this thread should work with.....
+						// TODO finish making the set/get request buffer types
+						// then declare static variables for the buffers using
+						// those types....
+						std::this_thread::sleep_for(std::chrono::milliseconds(TTickRate));
+					}
+
+					IsRunning.store(false, std::memory_order_release);
+				}).detach();
+			}
+
+			FORCEINLINE void StopThread()
+			{
+				ShouldStop.store(true, std::memory_order_release);
+			}
+
+			FORCEINLINE bool GetIsRunning() const
+			{
+				return IsRunning.load(std::memory_order_acquire);
+			}
+
+		private:
+			std::atomic<bool> IsRunning;
+			std::atomic<bool> ShouldStop;
+		};
+		
 	public:
 		template<typename T> using FColumnAttribute	=
 			TableDataStatics::Internal::IColumnAttribute<T>;
@@ -293,6 +533,33 @@ namespace IPCFile
 		IPCFileManager() = default;
 		~IPCFileManager() = default;
 
+		/*
+		 * Initialize the system on the Unreal Engine side
+		 */
+		static FORCEINLINE void UE_Initialize()
+		{
+			// Allocate reserve sizes for unreal buffers
+			UE_GetRequestBuffer.reserve(UE_BUFFER_MAX);
+			UE_SetRequestBuffer.reserve(UE_BUFFER_MAX);
+
+			// todo create the thread(s) that will manage the buffers
+			std::thread([=]()
+			{
+				
+			}).detach();
+		}
+
+		/*
+		 * Initialize the system on the AWS side
+		 */
+		static FORCEINLINE void AWS_Initialize()
+		{
+			// Allocate reserve sizes for aws buffer
+			AWS_SetRequestBuffer.reserve(AWS_BUFFER_MAX);
+
+			// todo create the thread(s) that will manage the buffers
+		}
+		
 		/**
 		 * \brief Create a file with a given name and location.
 		 * \param FileStream
@@ -329,7 +596,60 @@ namespace IPCFile
 		 * Also.. both the getter & setter functions will also need some
 		 * sort of id token, one for the transaction itself, the other
 		 * will be used to id the player invoking the request
+		 *
+		 * TODO The current setup is only really good for doing set requests,
+		 * as stated above, a new type will be need to simply list what attributes
+		 * to get when doing a get request
+		 *
+		 * TODO The AWS Process will never need to make a get request to the
+		 * unreal process, the AWS process will only make a set request to
+		 * the unreal process, after the unreal process makes a get request
+		 *
+		 * UE get request -> AWS Process -> Loads from DynamoDB ->
+		 * AWS set request -> UE Process
+		 *
+		 * UE set request -> AWS Process -> Set in DynamoDB
 		 */
+
+		static FORCEINLINE bool UE_AddGetRequestToBuffer(
+			const FGetRequest& GetRequest)
+		{
+			if(GetRequest.IsEmpty())
+			{
+				return false;
+			}
+			
+			std::string AttributeLine = TableKey_PlayerAuthID.Key +
+				ATTRIBUTE_DELIM_CHAR + GetRequest.GetPlayerAuthIDString() +
+					DELIM_CHAR;
+			for(int i = 0; i < GetRequest.Size(); ++i)
+			{
+				if(GetRequest[i] == TableKey_PlayerName.Name)
+				{
+					AttributeLine += TableKey_PlayerName.Key;
+				}
+				else if(GetRequest[i] == TableKey_IsOnline.Name)
+				{
+					AttributeLine += TableKey_IsOnline.Key;
+				}
+				AttributeLine += DELIM_CHAR;
+			}
+			// Add the new line to the buffer
+			UE_GetRequestBuffer.push_back(AttributeLine);
+			return true;
+		} 
+		
+		static FORCEINLINE bool UE_AddSetRequestToBuffer(
+			const FSetRequest& SetRequest)
+		{
+			return false;
+		}
+
+		static FORCEINLINE bool AWS_AddSetRequestToBuffer(
+			const FSetRequest& SetRequest)
+		{
+			return false;
+		}
 		
 		static FORCEINLINE bool WriteAttributeVectorToFile(
 			const std::string& FileLocation,
@@ -570,7 +890,7 @@ namespace IPCFile
 		 * \param Out String to store the output in.
 		 */
 		template<typename T>
-		static FORCEINLINE void FASTCALL StringifyAttribute(
+		static FORCEINLINE void StringifyAttribute(
 			const IAttribute<T>& Attribute,
 			std::string& Out)
 		{
@@ -589,7 +909,7 @@ namespace IPCFile
 			}
 		}
 
-		static FORCEINLINE bool FASTCALL GetListOfFiles(
+		static FORCEINLINE bool GetListOfFiles(
 			const std::string& Directory,
 			std::vector<std::string>& OutFileList)
 		{
@@ -612,25 +932,43 @@ namespace IPCFile
 			const uint64_t UniqueID = FileNameIncrementor.fetch_add(1,
 				std::memory_order_seq_cst);
 			const std::string UniqueIDString = std::to_string(UniqueID);
-			const std::string RequestTypeString = (RequestType == ERequestType::GET) ?
-				(GET_REQUEST_STRING) : (SET_REQUEST_STRING);
+			std::string RequestTypeString;
+			switch(RequestType)
+			{
+				case ERequestType::GET:
+					RequestTypeString = GET_REQUEST_STRING;
+					break;
+				case ERequestType::GET_RESPONSE:
+					RequestTypeString = GET_RESPONSE_REQUEST_STRING;
+					break;
+				case ERequestType::SET:
+					RequestTypeString = SET_REQUEST_STRING;
+					break;
+				default:
+					break;
+			}
 			// Output the file name
-			Out = RequestTypeString + FILE_DELIM_CHAR + UniqueIDString;
+			Out = RequestTypeString + FILE_DELIM_CHAR + UniqueIDString +
+				FILE_DELIM_CHAR + GetSystemTimeAsString();
 		}
 		
-		static FORCEINLINE std::string FASTCALL GetSystemTimeAsString() noexcept
+		static FORCEINLINE std::string GetSystemTimeAsString() noexcept
 		{
-			// TODO
-			return "";
-		}
-
-		static FORCEINLINE void FASTCALL GetSystemTime() noexcept
-		{
-			// TODO
+			const time_t CurrentTime = time(0);
+			const tm *TimeStruct = gmtime(&CurrentTime);
+			return std::string(
+				std::to_string(TimeStruct->tm_hour) + FILE_TIME_DELIM_CHAR + 
+				std::to_string(TimeStruct->tm_min) + FILE_TIME_DELIM_CHAR + 
+				std::to_string(TimeStruct->tm_sec));
 		}
 
 	private:
-		inline static std::atomic<uint64_t> FileNameIncrementor; 
+		inline static std::atomic<uint64_t> FileNameIncrementor;
+
+		inline static std::vector<std::string> UE_GetRequestBuffer;
+		inline static std::vector<std::string> UE_SetRequestBuffer;
+		
+		inline static std::vector<std::string> AWS_SetRequestBuffer;
 	};
 }
 
@@ -643,11 +981,19 @@ namespace IPCFile
 #undef TRUE_STRING
 #undef FALSE_STRING
 
-#undef GET_REQUEST_STRING		
+#undef GET_REQUEST_STRING
+#undef GET_RESPONSE_REQUEST_STRING
 #undef SET_REQUEST_STRING		
-#undef FILE_DELIM_CHAR			
+#undef FILE_DELIM_CHAR
+#undef FILE_TIME_DELIM_CHAR
 
 #undef ATTRIBUTE_CHAR_MAX
+
+#undef UE_BUFFER_MAX
+#undef AWS_BUFFER_MAX
+
+#undef UE_BUFFER_TICK_RATE
+#undef AWS_BUFFER_TICK_RATE
 
 #undef IPC_PLATFORM_CACHE_LINE_SIZE
 #undef IPC_ALIGN_TO_CACHE_LINE
