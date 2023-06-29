@@ -17,10 +17,12 @@
 	#if !defined(FORCEINLINE)
 		#define FORCEINLINE __forceinline
 	#endif
+	#define SPIN_LOOP_PAUSE _mm_pause
 #else // linux
 	#if !defined(FORCEINLINE)
 		#define FORCEINLINE inline 
 	#endif
+	#define SPIN_LOOP_PAUSE __builtin_ia32_pause
 #endif
 
 #define NEWLINE_CHAR			'\n'
@@ -44,11 +46,13 @@
 #define UE_BUFFER_MAX			65536
 #define AWS_BUFFER_MAX			65536
 
-#define UE_BUFFER_TICK_RATE		128
-#define AWS_BUFFER_TICK_RATE	128
+#define UE_BUFFER_TICK_RATE		32
+#define AWS_BUFFER_TICK_RATE	32
 
 #define IPC_PLATFORM_CACHE_LINE_SIZE	64
 #define IPC_ALIGN_TO_CACHE_LINE			alignas(IPC_PLATFORM_CACHE_LINE_SIZE)
+
+#define SPIN_LOOP_SLEEP_TIME_MS			10
 
 namespace IPCFile
 {
@@ -78,16 +82,58 @@ namespace IPCFile
 
 	struct FToken
 	{
-		FToken()
-			: Token(Incrementor.fetch_add(1, std::memory_order_seq_cst))
+		FToken() = default;
+		
+		FToken(const FToken& InToken)
+			: Token(InToken.GetToken())
 		{
 		}
-		
-		FORCEINLINE uint64_t GenerateNewToken()
+
+		FToken(const uint64_t InToken)
+			: Token(InToken)
 		{
-			Token = Incrementor.fetch_add(1, std::memory_order_seq_cst);
+		}
+
+		void operator=(const FToken& In)
+		{
+			Token = In.GetToken();
+		}
+
+		void operator=(const uint64_t In)
+		{
+			Token = In;
+		}
+
+		FORCEINLINE uint64_t GetToken() const noexcept
+		{
 			return Token;
 		}
+
+		FORCEINLINE void SetToken(const FToken& InToken) noexcept
+		{
+			Token = InToken.GetToken();
+		}
+
+		FORCEINLINE void SetToken(const uint64_t InToken) noexcept
+		{
+			Token = InToken;
+		}
+
+		FORCEINLINE std::string ToString() const noexcept
+		{
+			return std::to_string(Token);
+		}
+
+		static FORCEINLINE void GenerateNewToken(FToken& OutToken) noexcept
+		{
+			OutToken.SetToken(Incrementor.fetch_add(1, std::memory_order_seq_cst));
+		}
+		
+		static FORCEINLINE uint64_t GenerateNewToken() noexcept
+		{
+			return Incrementor.fetch_add(1, std::memory_order_seq_cst);
+		}
+	
 
 	private:
 		uint64_t Token;
@@ -137,7 +183,8 @@ namespace IPCFile
 		namespace Internal
 		{
 			template<typename T>
-			class IPC_ALIGN_TO_CACHE_LINE IColumnAttribute final : public IAttribute<T>
+			class IPC_ALIGN_TO_CACHE_LINE IColumnAttribute final
+				: public IAttribute<T>
 			{
 			public:
 				T Key = IAttribute<T>::Value;
@@ -438,6 +485,62 @@ namespace IPCFile
 			UE,
 			AWS
 		};
+
+		template<bool bShouldUseSleep = true>
+		struct FSpinLoop
+		{
+			FSpinLoop()
+				: Flag{false}
+			{
+			}
+
+			FORCEINLINE void RunLambdaThroughLock(
+				const std::function<void()>& LambdaFunctor)
+			{
+				Lock();
+				LambdaFunctor();
+				Unlock();
+			}
+			
+			FORCEINLINE void Lock() noexcept
+			{
+				for(;;)
+				{
+					if(!Flag.exchange(true, std::memory_order_acquire))
+					{
+						return;
+					}
+
+					while(Flag.load(std::memory_order_relaxed))
+					{
+						if(bShouldUseSleep)
+						{
+							std::this_thread::sleep_for(
+								std::chrono::milliseconds(
+									SPIN_LOOP_SLEEP_TIME_MS));
+						}
+						else
+						{
+							SPIN_LOOP_PAUSE();
+						}
+					}
+				}
+			}
+
+			FORCEINLINE bool TryLock() noexcept
+			{
+				return !Flag.load(std::memory_order_relaxed) &&
+					!Flag.exchange(true, std::memory_order_acquire);
+			}
+
+			FORCEINLINE void Unlock()
+			{
+				Flag.store(false, std::memory_order_release);
+			}
+
+		private:
+			std::atomic<bool> Flag;
+		};
 		
 		/*
 		 * TODO
@@ -447,34 +550,57 @@ namespace IPCFile
 		{
 		public:
 			FRequestBuffer()
-				: ReserveSize((TBufferPlatform == ERequestBufferType::UE) ?
-					(UE_BUFFER_MAX) : (AWS_BUFFER_MAX)),
-				CurrentReserveMultiplier(1)
+				: ReserveSize{(TBufferPlatform == ERequestBufferType::UE) ?
+					(UE_BUFFER_MAX) : (AWS_BUFFER_MAX)},
+				CurrentReserveMultiplier{1}
 			{
 				RequestBuffer.reserve(
 					ReserveSize * CurrentReserveMultiplier);
-			}
-
-			FORCEINLINE T& operator[](const int Index) const
-			{
-				return RequestBuffer[Index];
 			}
 
 			virtual FORCEINLINE void Initialize()
 			{
 				FRequestBuffer();
 			}
+
+			virtual FORCEINLINE void LockBuffer() noexcept
+			{
+				BufferLock.Lock();
+			}
+
+			virtual FORCEINLINE void UnlockBuffer() noexcept
+			{
+				BufferLock.Unlock();
+			}
+
+			virtual FORCEINLINE std::vector<T>* GetBuffer() const
+			{
+				return &RequestBuffer;
+			}
 			
 			virtual FORCEINLINE void PushBack(const T& InRequest)
 			{
-				if(Size() == (ReserveSize * CurrentReserveMultiplier))
+				if(Size() == (ReserveSize.load(std::memory_order_relaxed) *
+					CurrentReserveMultiplier.load(std::memory_order_acquire)))
 				{
-					CurrentReserveMultiplier += 1;
-					RequestBuffer.reserve(
+					CurrentReserveMultiplier.fetch_add(
+						1,std::memory_order_acq_rel);
+
+					BufferLock.RunLambdaThroughLock([=]()
+					{
+						RequestBuffer.reserve(
 						ReserveSize * CurrentReserveMultiplier);
+						RequestBuffer.push_back(InRequest);
+						BufferSize.fetch_add(1, std::memory_order_acq_rel);
+					});
+					return;
 				}
 
-				RequestBuffer.push_back(InRequest);
+				BufferLock.RunLambdaThroughLock([=]()
+				{
+					RequestBuffer.push_back(InRequest);
+					BufferSize.fetch_add(1, std::memory_order_acq_rel);
+				});
 			}
 
 			virtual FORCEINLINE bool PopBack(T& OutRequest)
@@ -483,27 +609,40 @@ namespace IPCFile
 				{
 					return false;
 				}
-				OutRequest = RequestBuffer.back();
-				RequestBuffer.pop_back();
+				BufferLock.RunLambdaThroughLock([=]()
+				{
+					OutRequest = RequestBuffer.back();
+					RequestBuffer.pop_back();
+					BufferSize.fetch_sub(1, std::memory_order_acq_rel);
+				});
 				return true;
 			}
 
 			virtual FORCEINLINE void Erase()
 			{
-				RequestBuffer.clear();
-				CurrentReserveMultiplier = 1;
-				RequestBuffer.reserve(
-					ReserveSize * CurrentReserveMultiplier);
+				BufferLock.RunLambdaThroughLock([=]()
+				{
+					RequestBuffer.clear();
+					BufferSize.store(0, std::memory_order_release);
+					const uint64_t Old = CurrentReserveMultiplier.fetch_add(
+						1, std::memory_order_acq_rel);
+					RequestBuffer.reserve(
+						ReserveSize.load(std::memory_order_relaxed) *
+							(Old + 1));
+				});
 			}
 
 			virtual FORCEINLINE size_t Size()
 			{
-				return RequestBuffer.size();
+				return BufferSize.load(std::memory_order_acquire);
 			}
 			
 		protected:
-			const uint64_t ReserveSize;
-			uint64_t CurrentReserveMultiplier;
+			const std::atomic<uint64_t> ReserveSize;
+			std::atomic<uint64_t> CurrentReserveMultiplier;
+			std::atomic<uint64_t> BufferSize;
+
+			FSpinLoop<true> BufferLock;
 			std::vector<T> RequestBuffer;
 		};
 		
@@ -511,7 +650,7 @@ namespace IPCFile
 		 * TODO
 		 */
 		template<ERequestBufferType TBufferPlatform>
-		class IPC_ALIGN_TO_CACHE_LINE FGetRequestBuffer
+		class IPC_ALIGN_TO_CACHE_LINE FGetRequestBuffer final
 			: public FRequestBuffer<FGetRequest, TBufferPlatform>
 		{
 		public:
@@ -530,7 +669,7 @@ namespace IPCFile
 		 * TODO
 		 */
 		template<ERequestBufferType TBufferPlatform>
-		class IPC_ALIGN_TO_CACHE_LINE FSetRequestBuffer
+		class IPC_ALIGN_TO_CACHE_LINE FSetRequestBuffer final
 			: public FRequestBuffer<FSetRequest, TBufferPlatform>
 		{
 		public:
@@ -549,7 +688,7 @@ namespace IPCFile
 		 * TODO
 		 */
 		template<ERequestBufferType TBufferRequestType>
-		class IPC_ALIGN_TO_CACHE_LINE FBufferThread final
+		class IPC_ALIGN_TO_CACHE_LINE FBufferThread
 		{
 			static constexpr int TickRate =
 				(TBufferRequestType == ERequestBufferType::UE) ?
@@ -560,26 +699,23 @@ namespace IPCFile
 				: IsRunning{false},
 				ShouldStop{false}
 			{
+				
 			}
 
-			/*
-			 * TODO create the initialization functions that will pass a functor
-			 * which represent 1 iteration of the threads tick. In said functions
-			 * each one will work on which ever buffers are relevant...
-			 */
-			FORCEINLINE void StartThread(const std::function<void()>& Functor)
+			virtual FORCEINLINE void StartThread(
+				const std::function<void()>& Functor)
 			{
-				if(this->IsRunning.load(std::memory_order_acquire))
+				if(IsRunning.load(std::memory_order_acquire))
 				{
 					return;
 				}
 				
 				std::thread([=] ()
 				{
-					this->IsRunning.store(true, std::memory_order_release);
+					IsRunning.store(true, std::memory_order_release);
 					for(;;)
 					{
-						if(this->ShouldStop.load(std::memory_order_acquire))
+						if(ShouldStop.load(std::memory_order_acquire))
 						{
 							break;
 						}
@@ -589,21 +725,21 @@ namespace IPCFile
 							std::chrono::milliseconds(TickRate));
 					}
 
-					this->IsRunning.store(false, std::memory_order_release);
+					IsRunning.store(false, std::memory_order_release);
 				}).detach();
 			}
 
-			FORCEINLINE void StopThread()
+			virtual FORCEINLINE void StopThread()
 			{
 				ShouldStop.store(true, std::memory_order_release);
 			}
 
-			FORCEINLINE bool GetIsRunning() const
+			virtual FORCEINLINE bool GetIsRunning() const
 			{
 				return IsRunning.load(std::memory_order_acquire);
 			}
 
-		protected:
+		private:
 			std::atomic<bool> IsRunning;
 			std::atomic<bool> ShouldStop;
 		};
@@ -618,6 +754,11 @@ namespace IPCFile
 			TableDataStatics::TableKey_PlayerName;
 		inline static const FColumnAttribute<std::string> TableKey_IsOnline =
 			TableDataStatics::TableKey_IsOnline;
+
+		template<ERequestBufferType TBufferRequestType> using FWriteBufferThread =
+			FBufferThread<TBufferRequestType>;
+		template<ERequestBufferType TBufferRequestType> using FReadBufferThread =
+			FBufferThread<TBufferRequestType>;
 		
 		IPCFileManager() = default;
 		~IPCFileManager() = default;
@@ -625,61 +766,62 @@ namespace IPCFile
 		/*
 		 * Initialize the system on the Unreal Engine side
 		 */
-		static FORCEINLINE void UE_Initialize()
+		static FORCEINLINE void UE_Initialize(
+			const std::function<void()>& SetThreadFunctor)
 		{
 			UE_GetRequestBuffer.Initialize();
+			UE_GetWriteThread.StartThread([=]()
+			{
+				// TODO
+			});
+			
 			UE_SetRequestBuffer.Initialize();
+			UE_SetWriteThread.StartThread([=]()
+			{
+				// TODO
+			});
+
+			UE_SetReadThread.StartThread(SetThreadFunctor);
+		}
+		
+		static FORCEINLINE void UE_Shutdown()
+		{
+			UE_GetRequestBuffer.Erase();
+			UE_GetWriteThread.StopThread();
+			
+			UE_SetRequestBuffer.Erase();
+			UE_SetWriteThread.StopThread();
+
+			UE_SetReadThread.StopThread();
 		}
 
 		/*
 		 * Initialize the system on the AWS side
 		 */
-		static FORCEINLINE void AWS_Initialize()
+		static FORCEINLINE void AWS_Initialize(
+			const std::function<void()>& SetThreadFunctor,
+			const std::function<void()>& GetThreadFunctor)
 		{
 			AWS_SetRequestBuffer.Initialize();
+			AWS_SetWriteThread.StartThread([=]()
+			{
+				// TODO
+			});
+
+			AWS_SetReadThread.StartThread(SetThreadFunctor);
+			AWS_GetReadThread.StartThread(GetThreadFunctor);
 		}
-		
-		/**
-		 * \brief Create a file with a given name and location.
-		 * \param FileStream
-		 * \param FileName Name of the file.
-		 * \param Directory Full directory path to put the file in.
-		 */
-		static FORCEINLINE void CreateFile(
-			FILE *FileStream,
-			const std::string& FileName,
-			const std::string& Directory)
+
+		static FORCEINLINE void AWS_Shutdown()
 		{
-			const std::string FileLocation = Directory + "\\" + FileName;
-			fopen_s(&FileStream, FileLocation.c_str(), WRITE_MODE);
+			AWS_SetRequestBuffer.Erase();
+			AWS_SetWriteThread.StopThread();
+
+			AWS_SetReadThread.StopThread();
+			AWS_GetReadThread.StopThread();
 		}
 
-		/**
-		 * \brief Delete a certain file.
-		 * \param FileName Name of the file.
-		 * \param Directory Full directory path to put the file in.
-		 */
-		static FORCEINLINE void DeleteFile(
-			const std::string& FileName,
-			const std::string& Directory)
-		{
-			const std::string FileLocation = Directory + "\\" + FileName;
-			remove(FileLocation.c_str());
-		}
-
-
-		/* TODO: Create functions for getting data,
-		 * they will need a new type used to simply list
-		 * what attributes are desired..
-		 *
-		 * Also.. both the getter & setter functions will also need some
-		 * sort of id token, one for the transaction itself, the other
-		 * will be used to id the player invoking the request
-		 *
-		 * TODO The current setup is only really good for doing set requests,
-		 * as stated above, a new type will be need to simply list what attributes
-		 * to get when doing a get request
-		 *
+		/* 
 		 * TODO The AWS Process will never need to make a get request to the
 		 * unreal process, the AWS process will only make a set request to
 		 * the unreal process, after the unreal process makes a get request
@@ -822,6 +964,34 @@ namespace IPCFile
 		}
 
 	private:
+		/**
+		 * \brief Create a file with a given name and location.
+		 * \param FileStream
+		 * \param FileName Name of the file.
+		 * \param Directory Full directory path to put the file in.
+		 */
+		static FORCEINLINE void CreateFile(
+			FILE *FileStream,
+			const std::string& FileName,
+			const std::string& Directory)
+		{
+			const std::string FileLocation = Directory + "\\" + FileName;
+			fopen_s(&FileStream, FileLocation.c_str(), WRITE_MODE);
+		}
+
+		/**
+		 * \brief Delete a certain file.
+		 * \param FileName Name of the file.
+		 * \param Directory Full directory path to put the file in.
+		 */
+		static FORCEINLINE void DeleteFile(
+			const std::string& FileName,
+			const std::string& Directory)
+		{
+			const std::string FileLocation = Directory + "\\" + FileName;
+			remove(FileLocation.c_str());
+		}
+		
 		/**
 		 * \brief Read a list of player attribute strings from a file, stores
 		 * them in an output variable.
@@ -1001,9 +1171,8 @@ namespace IPCFile
 		static FORCEINLINE void GeneratorUniqueFileName(std::string& Out,
 			const ERequestType& RequestType)
 		{
-			const uint64_t UniqueID = FileNameIncrementor.fetch_add(1,
-				std::memory_order_seq_cst);
-			const std::string UniqueIDString = std::to_string(UniqueID);
+			const FToken UniqueIDToken = FToken::GenerateNewToken();
+			const std::string UniqueIDString = UniqueIDToken.ToString();
 			std::string RequestTypeString;
 			switch(RequestType)
 			{
@@ -1036,13 +1205,23 @@ namespace IPCFile
 
 	private:
 		inline static std::atomic<uint64_t> FileNameIncrementor;
-
-		inline static FGetRequestBuffer<ERequestBufferType::UE> UE_GetRequestBuffer;
-		inline static FSetRequestBuffer<ERequestBufferType::UE> UE_SetRequestBuffer;
 		
-		inline static FSetRequestBuffer<ERequestBufferType::AWS> AWS_SetRequestBuffer;
+		inline static FGetRequestBuffer<ERequestBufferType::UE>		UE_GetRequestBuffer;
+		inline static FWriteBufferThread<ERequestBufferType::UE>	UE_GetWriteThread;
+
+		inline static FSetRequestBuffer<ERequestBufferType::UE>		UE_SetRequestBuffer;
+		inline static FWriteBufferThread<ERequestBufferType::UE>	UE_SetWriteThread;
+		inline static FReadBufferThread<ERequestBufferType::UE>		UE_SetReadThread;
+		
+		inline static FSetRequestBuffer<ERequestBufferType::AWS>	AWS_SetRequestBuffer;
+		inline static FWriteBufferThread<ERequestBufferType::AWS>	AWS_SetWriteThread;
+		inline static FReadBufferThread<ERequestBufferType::AWS>	AWS_SetReadThread;
+		inline static FReadBufferThread<ERequestBufferType::AWS>	AWS_GetReadThread;
 	};
 }
+
+#undef FORCEINLINE
+#undef SPIN_LOOP_PAUSE
 
 #undef NEWLINE_CHAR
 #undef DELIM_CHAR
