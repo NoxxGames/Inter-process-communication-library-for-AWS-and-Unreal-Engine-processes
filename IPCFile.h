@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <thread>
 #include <functional>
+#include <immintrin.h>
 
 #if defined(_WIN64) || defined(_WIN32) // windows
 	#if !defined(FORCEINLINE)
@@ -33,13 +34,14 @@
 #define ATTRIBUTE_DELIM_CHAR	':'
 #define TRUE_STRING				"1"
 #define FALSE_STRING			"0"
-#define FILE_FOOTER_STRING		"EOF"
 
 #define GET_REQUEST_STRING		"GET"
 #define GET_RESPONSE_REQUEST_STRING		"GETRESPONSE"
 #define SET_REQUEST_STRING		"SET"
 #define FILE_DELIM_CHAR			'#'
 #define FILE_TIME_DELIM_CHAR	'-'
+#define FILE_FOOTER_STRING		"EOF"
+#define FILE_DIRECTORY_DELIM	"\\"
 
 #define ATTRIBUTE_CHAR_MAX		1024
 
@@ -368,6 +370,15 @@ namespace IPCFile
 	public:
 
 		FGetRequest() = delete;
+		FGetRequest(const FGetRequest& InRequest)
+			: FIPCRequest(InRequest.GetPlayerAuthID())
+		{
+			for(int i = 0; i < InRequest.Size(); ++i)
+			{
+				AddAttributeToGet(InRequest[i]);
+			}
+		}
+		
 		FGetRequest(const IAttributeString& InPlayerAuthID)
 			: FIPCRequest(InPlayerAuthID),
 			AttributesToGet{}
@@ -382,12 +393,12 @@ namespace IPCFile
 		{
 		}
 
-		EAttributeName& operator[](const int Index)
+		EAttributeName operator[](const int Index) const
 		{
 			return AttributesToGet[Index];
 		}
-		
-		EAttributeName operator[](const int Index) const
+
+		EAttributeName& operator[](const int Index)
 		{
 			return AttributesToGet[Index];
 		}
@@ -401,6 +412,18 @@ namespace IPCFile
 
 			AttributesToGet.push_back(InAttributeName);
 			return true;
+		}
+
+		FORCEINLINE bool GetAttribute(
+			const int Index,
+			EAttributeName& OutAttribute) const
+		{
+			if(Index < Size())
+			{
+				OutAttribute = AttributesToGet[Index];
+				return true;
+			}
+			return false;
 		}
 
 		virtual FORCEINLINE bool IsEmpty() const noexcept override
@@ -544,6 +567,10 @@ namespace IPCFile
 		
 		/*
 		 * TODO
+		 *
+		 * TODO This type currently is using a vector to store the data..
+		 * TODO this is not very efficient memory wise.. a circular buffer
+		 * TODO is required to make this simple
 		 */
 		template<typename T, ERequestBufferType TBufferPlatform>
 		class IPC_ALIGN_TO_CACHE_LINE FRequestBuffer
@@ -573,9 +600,9 @@ namespace IPCFile
 				BufferLock.Unlock();
 			}
 
-			virtual FORCEINLINE std::vector<T>* GetBuffer() const
+			virtual FORCEINLINE std::vector<T>& GetBuffer() const
 			{
-				return &RequestBuffer;
+				return RequestBuffer;
 			}
 			
 			virtual FORCEINLINE void PushBack(const T& InRequest)
@@ -632,9 +659,14 @@ namespace IPCFile
 				});
 			}
 
-			virtual FORCEINLINE size_t Size()
+			virtual FORCEINLINE size_t Size() const noexcept
 			{
 				return BufferSize.load(std::memory_order_acquire);
+			}
+
+			virtual FORCEINLINE void RunLambdaThroughLock(const std::function<void()>& Lambda)
+			{
+				BufferLock.RunLambdaThroughLock(Lambda);
 			}
 			
 		protected:
@@ -865,6 +897,117 @@ namespace IPCFile
 			return true;
 		}
 		
+		static FORCEINLINE bool UE_WriteGetRequestBufferToFile(
+			const std::string& FileLocation)
+		{
+			if(UE_GetRequestBuffer.Size() == 0)
+			{
+				return false;
+			}
+			
+			UE_GetRequestBuffer.RunLambdaThroughLock([=] ()
+			{
+				WriteGetRequestsToFile<ERequestBufferType::UE>(
+					FileLocation,
+					UE_GetRequestBuffer);
+			});
+			
+			return true;
+		}
+
+		static FORCEINLINE bool UE_WriteSetRequestBufferToFile(
+			const std::string& FileLocation)
+		{
+			if(UE_SetRequestBuffer.Size() == 0)
+			{
+				return false;
+			}
+
+			UE_SetRequestBuffer.RunLambdaThroughLock([=]()
+			{
+				
+			});
+			return true;
+		}
+
+		template<ERequestBufferType TBufferType>
+		static FORCEINLINE bool WriteGetRequestsToFile(
+			const std::string FileLocation,
+			const FGetRequestBuffer<TBufferType>& GetBuffer)
+		{
+			const std::vector<FGetRequest>& Requests =
+					GetBuffer.GetBuffer();
+			std::string CompleteFileString = "";
+			for(int i = 0; i < GetBuffer.Size(); ++i)
+			{
+				const FGetRequest Request = Requests[i];
+				std::string CurrentLine = "";
+				for(int j = 0; j < Request.Size(); ++j)
+				{
+					switch(Request[j])
+					{
+						case EAttributeName::NONE:
+							break;
+						case EAttributeName::PLAYER_AUTH:
+							CurrentLine.append(TableKey_PlayerAuthID.Key);
+							break;
+						case EAttributeName::PLAYER_NAME:
+							CurrentLine.append(TableKey_PlayerName.Key);
+							break;
+						case EAttributeName::IS_ONLINE:
+							CurrentLine.append(TableKey_IsOnline.Key);
+							break;
+						default:
+							break;
+					}
+					CurrentLine += DELIM_CHAR;
+				}
+				CurrentLine += NEWLINE_CHAR;
+				CompleteFileString.append(CurrentLine);
+			}
+			CompleteFileString.append(FILE_FOOTER_STRING);
+
+			std::string UniqueFileName;
+			GeneratorUniqueFileName(UniqueFileName, ERequestType::GET);
+			const std::string FullNameAndPath = FileLocation +
+				FILE_DIRECTORY_DELIM + UniqueFileName + FILE_EXTENSION;
+			
+			return WriteStringToFile(FullNameAndPath, CompleteFileString);
+		}
+
+		template<ERequestBufferType TBufferType>
+		static FORCEINLINE bool WriteSetRequestsToFile(
+			const std::string FileLocation,
+			const FSetRequestBuffer<TBufferType>& SetBuffer)
+		{
+			const std::vector<FSetRequest>& Requests =
+				SetBuffer.GetBuffer();
+			std::string CompleteFileString = "";
+			for(int i = 0; i < SetBuffer.Size(); ++i)
+			{
+				const FSetRequest Request = Requests[i];
+				std::string CurrentLine = "";
+
+				for(int j = 0; j < Request.Size(); ++j)
+				{
+					// TODO ...... The function below this one doees what we need
+					// TODO ...... here but it needs to be adjusted 
+
+					CurrentLine += DELIM_CHAR;
+				}
+				CurrentLine += NEWLINE_CHAR;
+				CompleteFileString.append(CurrentLine);
+			}
+			CompleteFileString.append(FILE_FOOTER_STRING);
+
+			std::string UniqueFileName;
+			GeneratorUniqueFileName(UniqueFileName, ERequestType::SET);
+			const std::string FullNameAndPath = FileLocation +
+				FILE_DIRECTORY_DELIM + UniqueFileName + FILE_EXTENSION;
+				
+			return WriteStringToFile(FullNameAndPath, CompleteFileString);
+		}
+		
 		static FORCEINLINE bool WriteAttributeVectorToFile(
 			const std::string& FileLocation,
 			const std::vector<FPlayerAttributeList>& InAttributeArray)
@@ -990,6 +1133,21 @@ namespace IPCFile
 		{
 			const std::string FileLocation = Directory + "\\" + FileName;
 			remove(FileLocation.c_str());
+		}
+
+		static FORCEINLINE bool WriteStringToFile(
+			const std::string& FullNameAndPath,
+			const std::string& FileString)
+		{
+			FILE *File;
+			fopen_s(&File, FullNameAndPath.c_str(), WRITE_MODE);
+			if(!File)
+			{
+				return false;
+			}
+			fputs(FileString.c_str(), File);
+			fclose(File);
+			return true;
 		}
 		
 		/**
@@ -1232,11 +1390,13 @@ namespace IPCFile
 #undef TRUE_STRING
 #undef FALSE_STRING
 
+
 #undef GET_REQUEST_STRING
 #undef GET_RESPONSE_REQUEST_STRING
 #undef SET_REQUEST_STRING		
 #undef FILE_DELIM_CHAR
 #undef FILE_TIME_DELIM_CHAR
+#undef FILE_DIRECTORY_DELIM
 
 #undef ATTRIBUTE_CHAR_MAX
 
