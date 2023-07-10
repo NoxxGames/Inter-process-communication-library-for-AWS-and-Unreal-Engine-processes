@@ -1,12 +1,23 @@
-
-#include <cstdlib>
-
 #include "IPCFile.h"
+
+using namespace IPCFile;
 
 int main(int argc, char* argv[])
 {
+    const IAttributeString PlayerAuth = IAttributeString(
+        EAttributeName::IS_ONLINE, "TestValue");
+    std::vector<EAttributeName> AttributesToGet;
+    AttributesToGet.push_back(EAttributeName::IS_ONLINE);
+    FGetRequest GetRequest = FGetRequest(PlayerAuth, AttributesToGet);
 
-    const IPCFile::IAttribute<int> myat = IPCFile::IAttribute<int>(IPCFile::EAttributeTypes::INT, IPCFile::EAttributeName::PLAYER_NAME, 5);
+    IPCFileManager::UE_Initialize([=]()
+    {
+        // dont need this for this test
+    });
+
+    IPCFileManager::UE_AddGetRequestToBuffer(GetRequest);
+    IPCFileManager::UE_WriteGetRequestBufferToFile(
+        "C:\\Users\\josh_\\Documents\\IPCtest");
     
     system("pause");
     return 0;
