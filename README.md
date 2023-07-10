@@ -1,1 +1,1 @@
-# Inter-process-communication-library-for-AWS-and-Unreal-Engine-processes
+# Inter Process Communication Library for AWS and Unreal Engine processes
