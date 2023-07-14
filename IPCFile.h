@@ -49,6 +49,7 @@
 
 #define UE_BUFFER_MAX					65536
 #define AWS_BUFFER_MAX					65536
+#define PENDING_REQUEST_RESERVE_SIZE	8192
 
 #define UE_BUFFER_TICK_RATE				8
 #define AWS_BUFFER_TICK_RATE			8
@@ -660,27 +661,31 @@ namespace IPCFile
 	private:
 		const FPlayerAttributeList PlayerAttributes;
 	};
-
+	
 	/*
 	 * IPCFileManager main static class
 	 */
 	class IPC_ALIGN_TO_CACHE_LINE IPCFileManager final
 	{
+		/** The tick rate for threads on the UE side to use */
 		static constexpr int UE_BufferTickRateMS = 1000 / UE_BUFFER_TICK_RATE;
+		/** The tick rate for threads on the AWS side to use */
 		static constexpr int AWS_BufferTickRateMS = 1000 / AWS_BUFFER_TICK_RATE;
-
-		/*
-		 * TODO
+		
+		/**
+		 * \brief Used to identify which platform a @link FRequestBuffer will be used on.
 		 */
 		enum class ERequestBufferType : uint8_t
 		{
 			UE,
-			AWS
+			AWS,
+			BOTH
 		};
 
-		/*
-		 * TODO
-		 */
+		/**
+ * \brief A basic Spin-lock implementation
+ * \tparam bShouldUseSleep Should this SpinLoop use a sleep or not?
+ */
 		template<bool bShouldUseSleep = true>
 		struct FSpinLoop
 		{
@@ -688,12 +693,14 @@ namespace IPCFile
 				: Flag{false}
 			{
 			}
-
-			/*
-			 * TODO
+			
+			/**
+			 * \brief Run a Lambda functor through the lock
+			 * \param LambdaFunctor The functor to run
+			 * \return TODO this always returns true...
 			 */
 			FORCEINLINE bool RunLambdaThroughLock(
-				const std::function<void()>& LambdaFunctor)
+				std::function<void()>& LambdaFunctor)
 			{
 				Lock();
 				LambdaFunctor();
@@ -772,29 +779,32 @@ namespace IPCFile
 					ReserveSize * CurrentReserveMultiplier);
 			}
 
-			/*
-			 * TODO
+			/**
+			 * \brief Initialize this buffer
 			 */
 			virtual FORCEINLINE void Initialize()
 			{
 				FRequestBuffer();
 			}
 
-			/*
-			 * TODO
+			/**
+			 * \brief Lock the buffer
 			 */
 			virtual FORCEINLINE void LockBuffer() noexcept
 			{
 				BufferLock.Lock();
 			}
 
+			/**
+			 * \brief Unlock the buffer
+			 */
 			virtual FORCEINLINE void UnlockBuffer() noexcept
 			{
 				BufferLock.Unlock();
 			}
 
-			/*
-			 * TODO
+			/**
+			 * \brief Get a reference to the buffer
 			 */
 			virtual FORCEINLINE std::vector<T>& GetBuffer()
 			{
@@ -826,13 +836,26 @@ namespace IPCFile
 					RequestBuffer.push_back(InRequest);
 				});
 				BufferSize.fetch_add(1, std::memory_order_acq_rel);
-				return;
+			}
+
+			virtual FORCEINLINE bool RemoveIndex(const uint32_t Index)
+			{
+				if(IsEmpty())
+				{
+					return false;
+				}
+				BufferSize.fetch_sub(1, std::memory_order_acq_rel);
+				BufferLock.RunLambdaThroughLock([=]()
+				{
+					RequestBuffer.erase(Index);
+				});
+				return true;
 			}
 			
 			/**
 			 * \brief Completely erase all elements from the buffer in a thread safe manner.
 			 */
-			virtual FORCEINLINE void Erase()
+			virtual FORCEINLINE void Clear()
 			{
 				BufferLock.RunLambdaThroughLock([=]()
 				{
@@ -865,7 +888,7 @@ namespace IPCFile
 			 * \brief Runs a given functor that will be protected by the @link FSpinLoop lock.
 			 * \param Lambda Lambda functor to be run through the lock.
 			 */
-			virtual FORCEINLINE bool RunLambdaThroughLock(const std::function<void()>& Lambda)
+			virtual FORCEINLINE bool RunLambdaThroughLock(std::function<void()>& Lambda)
 			{
 				return BufferLock.RunLambdaThroughLock(Lambda);
 			}
@@ -876,7 +899,7 @@ namespace IPCFile
 			std::atomic<uint64_t> BufferSize;
 
 			FSpinLoop<true> BufferLock;
-			std::vector<T> RequestBuffer;
+			mutable std::vector<T> RequestBuffer;
 		};
 		
 		/**
@@ -889,12 +912,14 @@ namespace IPCFile
 		{
 		public:
 			FGetRequestBuffer()
-				: FRequestBuffer<FGetRequest, TBufferPlatform>()
+				: FRequestBuffer<FGetRequest, TBufferPlatform>(),
+				PendingGetRequestIDs{}
 			{
+				PendingGetRequestIDs.reserve(PENDING_REQUEST_RESERVE_SIZE);
 			}
 
-			/*
-			 * TODO
+			/**
+			 * \brief Initialize this buffer
 			 */
 			virtual FORCEINLINE void Initialize() override
 			{
@@ -908,22 +933,19 @@ namespace IPCFile
 			FORCEINLINE bool WriteGetRequestsToFileThroughLock(
 				const std::string& FileLocation)
 			{
-				return this->RunLambdaThroughLock([this, &FileLocation]() -> bool
+				return this->RunLambdaThroughLock([=]() -> bool
 				{
 					std::string CompleteFileString = "";
 					for(int i = 0; i < this->Size(); ++i)
 					{
 						const FGetRequest Request = this->RequestBuffer[i];
 						std::string CurrentLine;
-						/*
-						 * TODO need to have some way of returning the request ID
-						 * TODO so it can be tracked
-						 */
 						
 						// add a unique id to the beginning
-						const std::string RequestID = GenerateUniqueRequestID() +
-							REQUEST_ID_DELIM_CHAR;
-						CurrentLine.append(RequestID);
+						const std::string RequestID = GenerateUniqueRequestID();
+						// add this request to the pending requests
+						PendingGetRequestIDs.push_back(RequestID);
+						CurrentLine.append(RequestID + REQUEST_ID_DELIM_CHAR);
 						// add the player auth to the beginning so we know who it's for
 						const std::string PlayerAuth = Request.GetPlayerAuthIDString() +
 							DELIM_CHAR;
@@ -966,6 +988,15 @@ namespace IPCFile
 					return WriteStringToFile(FullNameAndPath, CompleteFileString);
 				});
 			}
+
+			FORCEINLINE bool DoProtectedWorkWithPendingGetRequestIDs(
+				const std::function<void()>& Functor)
+			{
+				return this->RunLambdaThroughLock(Functor);
+			}
+
+		private:
+			std::vector<std::string> PendingGetRequestIDs;
 		};
 		
 		/**
@@ -982,8 +1013,8 @@ namespace IPCFile
 			{
 			}
 
-			/*
-			 * TODO
+			/**
+			 * \brief Initialize this buffer
 			 */
 			virtual FORCEINLINE void Initialize() override
 			{
@@ -997,7 +1028,7 @@ namespace IPCFile
 			FORCEINLINE bool WriteSetRequestsToFileThroughLock(
 				const std::string& FileLocation)
 			{
-				return this->RunLambdaThroughLock([this, &FileLocation]()
+				return this->RunLambdaThroughLock([=]() -> bool
 				{
 					std::string CompleteFileString = "";
 					for(int i = 0; i < this->Size(); ++i)
@@ -1058,8 +1089,12 @@ namespace IPCFile
 				});
 			}
 		};
-
+		
 		/*
+		 * TODO Need to make sure any requests in the buffers are written to file
+		 * TODO upon shutdown of the threads & erasing the buffers...
+		 * TODO ... obivous data loss otherwise
+		 *
 		 * TODO
 		 */
 		template<ERequestBufferType TBufferRequestType>
@@ -1074,11 +1109,11 @@ namespace IPCFile
 				: IsRunning{false},
 				ShouldStop{false}
 			{
-				
 			}
-
-			/*
-			 * TODO
+			
+			/**
+			 * \brief Start the thread
+			 * \param Functor The functor that represents one tick of this thread.
 			 */
 			virtual FORCEINLINE void StartThread(
 				const std::function<void()>& Functor)
@@ -1107,8 +1142,8 @@ namespace IPCFile
 				}).detach();
 			}
 
-			/*
-			 * TODO
+			/**
+			 * \brief Stop the thread from running.
 			 */
 			virtual FORCEINLINE void StopThread()
 			{
@@ -1116,7 +1151,7 @@ namespace IPCFile
 			}
 
 			/*
-			 * TODO
+			 * \brief Check whether or not the thread is currently running.
 			 */
 			virtual FORCEINLINE bool GetIsRunning() const
 			{
@@ -1147,6 +1182,8 @@ namespace IPCFile
 		IPCFileManager() = default;
 		~IPCFileManager() = default;
 
+
+		
 		/* 
 		 * The AWS Process will never need to make a get request to the
 		 * unreal process, the AWS process will only make a set request to
@@ -1164,12 +1201,13 @@ namespace IPCFile
 		 * #################################################
 		 */
 		
-		/*
-		 * Initialize the system on the Unreal Engine side
+		/**
+		 * \brief Initialize the system on the UE side
 		 */
 		static FORCEINLINE void UE_Initialize(
 			const std::function<void()>& SetThreadFunctor)
 		{
+			Initialize();
 			UE_GetRequestBuffer.Initialize();
 			UE_GetWriteThread.StartThread([=]()
 			{
@@ -1183,24 +1221,43 @@ namespace IPCFile
 			});
 
 			UE_SetReadThread.StartThread(SetThreadFunctor);
+
+			UE_GetPendingRequestsBuffer.Initialize();
+			UE_GetPendingThread.StartThread([=]()
+			{
+				// TODO
+			});
 		}
 		
-		/*
-		 * TODO
+		/**
+		 * \brief Shutdown the threads and erase all buffers on the UE side
 		 */
 		static FORCEINLINE void UE_Shutdown()
 		{
-			UE_GetRequestBuffer.Erase();
-			UE_GetWriteThread.StopThread();
-			
-			UE_SetRequestBuffer.Erase();
 			UE_SetWriteThread.StopThread();
-
 			UE_SetReadThread.StopThread();
+			UE_GetWriteThread.StopThread();
+			UE_GetPendingThread.StopThread();
+			
+			// Wait for all threads to shutdown before erasing the buffers...
+			while(UE_SetWriteThread.GetIsRunning() ||
+				UE_SetReadThread.GetIsRunning() ||
+				UE_GetWriteThread.GetIsRunning() ||
+				UE_GetPendingThread.GetIsRunning())
+			{
+				std::this_thread::sleep_for(
+					std::chrono::milliseconds(10));
+			}
+			UE_GetRequestBuffer.Clear();
+			UE_SetRequestBuffer.Clear();
+			UE_GetPendingRequestsBuffer.Clear();
+			Shutdown();
 		}
 
-		/*
-		 * TODO
+		/**
+		 * \brief Add a @link FGetRequest to the buffer
+		 * \param GetRequest The @link FGetRequest to add to the buffer
+		 * \return Whether or not the Add worked
 		 */
 		static FORCEINLINE bool UE_AddGetRequestToBuffer(
 			const FGetRequest& GetRequest)
@@ -1210,11 +1267,14 @@ namespace IPCFile
 				return false;
 			}
 			UE_GetRequestBuffer.PushBack(GetRequest);
+			UE_GetPendingRequestsBuffer.PushBack(GetRequest);
 			return true;
 		} 
 		
-		/*
-		 * TODO
+		/**
+		 * \brief Add a @link FSetRequest to the buffer
+		 * \param SetRequest The @link FSetRequest to add to the buffer
+		 * \return Whether or not the Add worked
 		 */
 		static FORCEINLINE bool UE_AddSetRequestToBuffer(
 			const FSetRequest& SetRequest)
@@ -1227,8 +1287,10 @@ namespace IPCFile
 			return true;
 		}
 		
-		/*
-		 * TODO
+		/**
+		 * \brief Write the entire @link FGetRequestBuffer to file
+		 * \param FileLocation The directory to put the file into
+		 * \return Whether or not the write worked
 		 */
 		static FORCEINLINE bool UE_WriteGetRequestBufferToFile(
 			const std::string& FileLocation)
@@ -1238,12 +1300,13 @@ namespace IPCFile
 				return false;
 			}
 			
-			UE_GetRequestBuffer.WriteGetRequestsToFileThroughLock(FileLocation);
-			return true;
+			return UE_GetRequestBuffer.WriteGetRequestsToFileThroughLock(FileLocation);
 		}
 
-		/*
-		 * TODO
+		/**
+		 * \brief Write the entire @link FSetRequestBuffer to file
+		 * \param FileLocation The directory to put the file into
+		 * \return Whether or not the write worked
 		 */
 		static FORCEINLINE bool UE_WriteSetRequestBufferToFile(
 			const std::string& FileLocation)
@@ -1253,8 +1316,7 @@ namespace IPCFile
 				return false;
 			}
 
-			UE_SetRequestBuffer.WriteSetRequestsToFileThroughLock(FileLocation);
-			return true;
+			return UE_SetRequestBuffer.WriteSetRequestsToFileThroughLock(FileLocation);
 		}
 
 		/*
@@ -1263,8 +1325,8 @@ namespace IPCFile
 		 * #################################################
 		 */
 		
-		/*
-		 * Initialize the system on the AWS side
+		/**
+		 * \brief Initialize the system on the AWS side
 		 */
 		static FORCEINLINE void AWS_Initialize(
 			const std::function<void()>& SetThreadFunctor,
@@ -1281,19 +1343,30 @@ namespace IPCFile
 		}
 
 		/*
-		 * TODO
+		 * \brief Shutdown all threads and erase all bufers on the AWS side
 		 */
 		static FORCEINLINE void AWS_Shutdown()
 		{
-			AWS_SetRequestBuffer.Erase();
 			AWS_SetWriteThread.StopThread();
-
 			AWS_SetReadThread.StopThread();
 			AWS_GetReadThread.StopThread();
+			
+			// Wait for all threads to shutdown before erasing the buffers...
+			while(AWS_SetWriteThread.GetIsRunning() ||
+				AWS_SetReadThread.GetIsRunning() ||
+				AWS_GetReadThread.GetIsRunning())
+			{
+				std::this_thread::sleep_for(
+					std::chrono::milliseconds(10));
+			}
+			AWS_SetRequestBuffer.Clear();
+			Shutdown();
 		}
 		
-		/*
-		 * TODO
+		/**
+		 * \brief Add a @link FSetRequest to the buffer
+		 * \param SetRequest The @link FSetRequest to add to the buffer
+		 * \return Whether or not the Add worked
 		 */
 		static FORCEINLINE bool AWS_AddSetRequestToBuffer(
 			const FSetRequest& SetRequest)
@@ -1306,8 +1379,10 @@ namespace IPCFile
 			return true;
 		}
 
-		/*
-		 * TODO
+		/**
+		 * \brief Write the entire @link FSetRequestBuffer to file
+		 * \param FileLocation The directory to put the file into
+		 * \return Whether or not the write worked
 		 */
 		static FORCEINLINE bool AWS_WriteSetRequestBufferToFile(
 			const std::string& FileLocation)
@@ -1316,8 +1391,7 @@ namespace IPCFile
 			{
 				return false;
 			}
-			AWS_SetRequestBuffer.WriteSetRequestsToFileThroughLock(FileLocation);
-			return true;
+			return AWS_SetRequestBuffer.WriteSetRequestsToFileThroughLock(FileLocation);
 		}
 		
 		/*
@@ -1425,6 +1499,14 @@ namespace IPCFile
 		}
 
 	private:
+		static FORCEINLINE void Initialize()
+		{
+		}
+
+		static FORCEINLINE void Shutdown()
+		{
+		}
+		
 		/**
 		 * \brief Create a file with a given name and location.
 		 * \param FileStream
@@ -1609,9 +1691,12 @@ namespace IPCFile
 				}
 			}
 		}
-
-		/*
-		 * TODO
+		
+		/**
+		 * \brief Get a list of files in a particular directory
+		 * \param Directory The directory to search for files in
+		 * \param OutFileList The vector that the file names will be stored in
+		 * \return Fails if the directory does not exist, or if there were no files in the directory
 		 */
 		static FORCEINLINE bool GetListOfFiles(
 			const std::string& Directory,
@@ -1629,9 +1714,11 @@ namespace IPCFile
 			}
 			return OutFileList.size() > 0;
 		}
-
-		/*
-		 * TODO
+		
+		/**
+		 * \brief Create a unique file name
+		 * \param Out The string to store the generated name in
+		 * \param RequestType The type of request the file name is for
 		 */
 		static FORCEINLINE void GeneratorUniqueFileName(std::string& Out,
 			const ERequestType& RequestType)
@@ -1664,8 +1751,9 @@ namespace IPCFile
 				FILE_DELIM_CHAR + SystemTime;
 		}
 		
-		/*
-		 * TODO
+		/**
+		 * \brief Get the system time as a @link std::string
+		 * \return An @link std::string that represents the current local time.
 		 */
 		static FORCEINLINE std::string GetSystemTimeAsString() noexcept
 		{
@@ -1673,19 +1761,19 @@ namespace IPCFile
 			tm *TimeStruct = new tm();
 			time(&CurrentTime);
 			localtime_s(TimeStruct, &CurrentTime);
+			std::string Time = NULL_STRING;
 			if(TimeStruct)
 			{
-				return std::string(
-					std::to_string(TimeStruct->tm_hour) + FILE_TIME_DELIM_CHAR + 
+				Time = std::to_string(TimeStruct->tm_hour) + FILE_TIME_DELIM_CHAR + 
 					std::to_string(TimeStruct->tm_min) + FILE_TIME_DELIM_CHAR + 
-					std::to_string(TimeStruct->tm_sec));
+					std::to_string(TimeStruct->tm_sec);
 			}
-			
-			return NULL_STRING;
+			delete TimeStruct;
+			return Time;
 		}
 
-		/*
-		 * TODO
+		/**
+		 * \brief Create a unique ID for a @link FIPCRequest
 		 */
 		static FORCEINLINE std::string GenerateUniqueRequestID() noexcept
 		{
@@ -1701,6 +1789,9 @@ namespace IPCFile
 		inline static FSetRequestBuffer	<ERequestBufferType::UE>	UE_SetRequestBuffer;
 		inline static FWriteBufferThread<ERequestBufferType::UE>	UE_SetWriteThread;
 		inline static FReadBufferThread	<ERequestBufferType::UE>	UE_SetReadThread;
+
+		inline static FGetRequestBuffer <ERequestBufferType::UE>	UE_GetPendingRequestsBuffer;
+		inline static FReadBufferThread <ERequestBufferType::UE>	UE_GetPendingThread;
 		
 		inline static FSetRequestBuffer	<ERequestBufferType::AWS>	AWS_SetRequestBuffer;
 		inline static FWriteBufferThread<ERequestBufferType::AWS>	AWS_SetWriteThread;
@@ -1734,6 +1825,7 @@ namespace IPCFile
 
 #undef UE_BUFFER_MAX
 #undef AWS_BUFFER_MAX
+#undef PENDING_REQUEST_RESERVE_SIZE
 
 #undef UE_BUFFER_TICK_RATE
 #undef AWS_BUFFER_TICK_RATE

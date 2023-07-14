@@ -8,7 +8,7 @@ int main(int argc, char* argv[])
         EAttributeName::IS_ONLINE, "TestValue");
     std::vector<EAttributeName> AttributesToGet;
     AttributesToGet.push_back(EAttributeName::IS_ONLINE);
-    FGetRequest GetRequest = FGetRequest(PlayerAuth, AttributesToGet);
+    const FGetRequest GetRequest = FGetRequest(PlayerAuth, AttributesToGet);
 
     IPCFileManager::UE_Initialize([=]()
     {
