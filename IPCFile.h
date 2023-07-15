@@ -456,8 +456,10 @@ namespace IPCFile
 			TableDataStatics::NumberOfAttributes;
 
 		FIPCRequest() = default;
-		FIPCRequest(const IAttributeString& InPlayerAuthID)
-			: PlayerAuthID(InPlayerAuthID)
+		FIPCRequest(const IAttributeString& InPlayerAuthID,
+			const std::string& InRequestID)
+			: PlayerAuthID(InPlayerAuthID),
+			RequestID(InRequestID)
 		{
 		}
 
@@ -479,22 +481,28 @@ namespace IPCFile
 			return PlayerAuthID.Value;
 		}
 
+		virtual FORCEINLINE std::string GetRequestID() const noexcept
+		{
+			return RequestID;
+		}
+		
 		virtual FORCEINLINE bool IsEmpty() const noexcept = 0;
 		virtual FORCEINLINE size_t Size() const noexcept = 0;
 		
 	protected:
 		const IAttributeString PlayerAuthID;
+		const std::string RequestID;
 	};
 
 	/*
 	 * GetRequest
 	 */
-	class IPC_ALIGN_TO_CACHE_LINE FGetRequest final : public FIPCRequest
+	class IPC_ALIGN_TO_CACHE_LINE FGetRequest : public FIPCRequest
 	{
 	public:
 		FGetRequest() = default;
 		FGetRequest(const FGetRequest& InRequest)
-			: FIPCRequest(InRequest.GetPlayerAuthID())
+			: FIPCRequest(InRequest.GetPlayerAuthID(), InRequest.GetRequestID())
 		{
 			for(int i = 0; i < InRequest.Size(); ++i)
 			{
@@ -502,16 +510,18 @@ namespace IPCFile
 			}
 		}
 		
-		FGetRequest(const IAttributeString& InPlayerAuthID)
-			: FIPCRequest(InPlayerAuthID),
+		FGetRequest(const IAttributeString& InPlayerAuthID,
+			const std::string& InRequestID)
+			: FIPCRequest(InPlayerAuthID, InRequestID),
 			AttributesToGet{}
 		{
 		}
 
 		FGetRequest(
 			const IAttributeString& InPlayerAuthID,
+			const std::string& InRequestID,
 			const std::vector<EAttributeName>& InAttributesToGet)
-				: FIPCRequest(InPlayerAuthID),
+				: FIPCRequest(InPlayerAuthID, InRequestID),
 				AttributesToGet(InAttributesToGet)
 		{
 		}
@@ -616,20 +626,71 @@ namespace IPCFile
 	/*
 	 * SetRequest
 	 */
+	class IPC_ALIGN_TO_CACHE_LINE FPendingGetRequest final : public FGetRequest
+	{
+	public:
+		FPendingGetRequest() = default;
+		FPendingGetRequest(const FPendingGetRequest& InRequest)
+			: FGetRequest(InRequest.GetPlayerAuthID(), InRequest.GetRequestID()),
+			UniqueID(InRequest.GetUniqueID())
+		{
+		}
+
+		FPendingGetRequest(
+			const FGetRequest& InRequest,
+			const std::string& InUniqueID)
+			: FGetRequest(InRequest.GetPlayerAuthID(), InRequest.GetRequestID()),
+			UniqueID(InUniqueID)
+		{
+		}
+		
+		FPendingGetRequest(
+			const IAttributeString& InPlayerAuthID,
+			const std::string& InRequestID,
+			const std::string& InUniqueID)
+				: FGetRequest(InPlayerAuthID, InRequestID),
+				UniqueID(InUniqueID)
+		{
+		}
+		
+		/*
+		 * TODO
+		 */
+		FORCEINLINE const std::string& GetUniqueID() const
+		{
+			return UniqueID;
+		}
+
+		/*
+		 * TODO
+		 */	
+		FORCEINLINE void SetUniqueID(const std::string& InUniqueID) 
+		{
+			UniqueID = InUniqueID;
+		}
+		
+	private:
+		std::string UniqueID;
+	};
+	
+	/*
+	 * SetRequest
+	 */
 	class IPC_ALIGN_TO_CACHE_LINE FSetRequest final : public FIPCRequest
 	{
 	public:
 		FSetRequest() = default;
 		FSetRequest(const FSetRequest& InRequest)
-			: FIPCRequest(InRequest.GetPlayerAuthID()),
+			: FIPCRequest(InRequest.GetPlayerAuthID(), InRequest.GetRequestID()),
 			PlayerAttributes(InRequest.GetPlayerAttributeList())
 		{
 		}
 		
 		FSetRequest(
 			const IAttributeString& InPlayerAuthID,
+			const std::string& InRequestID,
 			const FPlayerAttributeList& InPlayerAttributes)
-				: FIPCRequest(InPlayerAuthID),
+				: FIPCRequest(InPlayerAuthID, InRequestID),
 				PlayerAttributes(InPlayerAttributes)
 		{
 		}
@@ -778,7 +839,7 @@ namespace IPCFile
 				RequestBuffer.reserve(
 					ReserveSize * CurrentReserveMultiplier);
 			}
-
+			
 			/**
 			 * \brief Initialize this buffer
 			 */
@@ -912,10 +973,8 @@ namespace IPCFile
 		{
 		public:
 			FGetRequestBuffer()
-				: FRequestBuffer<FGetRequest, TBufferPlatform>(),
-				PendingGetRequestIDs{}
+				: FRequestBuffer<FGetRequest, TBufferPlatform>()
 			{
-				PendingGetRequestIDs.reserve(PENDING_REQUEST_RESERVE_SIZE);
 			}
 
 			/**
@@ -940,11 +999,7 @@ namespace IPCFile
 					{
 						const FGetRequest Request = this->RequestBuffer[i];
 						std::string CurrentLine;
-						
-						// add a unique id to the beginning
-						const std::string RequestID = GenerateUniqueRequestID();
-						// add this request to the pending requests
-						PendingGetRequestIDs.push_back(RequestID);
+						const std::string RequestID = Request.GetRequestID();
 						CurrentLine.append(RequestID + REQUEST_ID_DELIM_CHAR);
 						// add the player auth to the beginning so we know who it's for
 						const std::string PlayerAuth = Request.GetPlayerAuthIDString() +
@@ -994,9 +1049,40 @@ namespace IPCFile
 			{
 				return this->RunLambdaThroughLock(Functor);
 			}
+		};
 
-		private:
-			std::vector<std::string> PendingGetRequestIDs;
+		template<ERequestBufferType TBufferPlatform>
+		class IPC_ALIGN_TO_CACHE_LINE FPendingGetRequestBuffer final
+			: public FRequestBuffer<FPendingGetRequest, TBufferPlatform>
+		{
+		public:
+			FPendingGetRequestBuffer()
+				: FRequestBuffer<std::string, TBufferPlatform>()
+			{
+			}
+
+			/**
+			 * \brief Initialize this buffer
+			 */
+			virtual FORCEINLINE void Initialize() override
+			{
+				FPendingGetRequestBuffer();
+			}
+
+			FPendingGetRequest operator[](const int Index)
+			{
+				FPendingGetRequest Out;
+				this->RunLambdaThroughLock([=]()
+				{
+					Out = this->RequestBuffer[Index];
+				});
+				return Out;
+			}
+
+			FORCEINLINE bool RemoveElement(const uint32_t Index)
+			{
+				return this->RemoveIndex(Index);
+			}
 		};
 		
 		/**
@@ -1204,8 +1290,7 @@ namespace IPCFile
 		/**
 		 * \brief Initialize the system on the UE side
 		 */
-		static FORCEINLINE void UE_Initialize(
-			const std::function<void()>& SetThreadFunctor)
+		static FORCEINLINE void UE_Initialize()
 		{
 			Initialize();
 			UE_GetRequestBuffer.Initialize();
@@ -1220,7 +1305,10 @@ namespace IPCFile
 				// TODO
 			});
 
-			UE_SetReadThread.StartThread(SetThreadFunctor);
+			UE_SetReadThread.StartThread([=]()
+			{
+				// TODO
+			});
 
 			UE_GetPendingRequestsBuffer.Initialize();
 			UE_GetPendingThread.StartThread([=]()
@@ -1267,7 +1355,8 @@ namespace IPCFile
 				return false;
 			}
 			UE_GetRequestBuffer.PushBack(GetRequest);
-			UE_GetPendingRequestsBuffer.PushBack(GetRequest);
+			UE_GetPendingRequestsBuffer.PushBack(
+				FPendingGetRequest(GetRequest, GetRequest.GetRequestID()));
 			return true;
 		} 
 		
@@ -1300,7 +1389,8 @@ namespace IPCFile
 				return false;
 			}
 			
-			return UE_GetRequestBuffer.WriteGetRequestsToFileThroughLock(FileLocation);
+			return UE_GetRequestBuffer.WriteGetRequestsToFileThroughLock(
+				FileLocation);
 		}
 
 		/**
@@ -1328,9 +1418,7 @@ namespace IPCFile
 		/**
 		 * \brief Initialize the system on the AWS side
 		 */
-		static FORCEINLINE void AWS_Initialize(
-			const std::function<void()>& SetThreadFunctor,
-			const std::function<void()>& GetThreadFunctor)
+		static FORCEINLINE void AWS_Initialize()
 		{
 			AWS_SetRequestBuffer.Initialize();
 			AWS_SetWriteThread.StartThread([=]()
@@ -1338,8 +1426,15 @@ namespace IPCFile
 				// TODO
 			});
 
-			AWS_SetReadThread.StartThread(SetThreadFunctor);
-			AWS_GetReadThread.StartThread(GetThreadFunctor);
+			AWS_SetReadThread.StartThread([=]()
+			{
+				// TODO
+			});
+			
+			AWS_GetReadThread.StartThread([=]()
+			{
+				// TODO
+			});
 		}
 
 		/*
@@ -1498,6 +1593,16 @@ namespace IPCFile
 			}
 		}
 
+		/**
+		 * \brief Create a unique ID for a @link FIPCRequest
+		 */
+		static FORCEINLINE std::string GenerateUniqueRequestID() noexcept
+		{
+			const FToken UniqueIDToken = FToken::GenerateNewToken();
+			const std::string UniqueIDString = UniqueIDToken.ToString();
+			return UniqueIDString;
+		}
+		
 	private:
 		static FORCEINLINE void Initialize()
 		{
@@ -1772,31 +1877,21 @@ namespace IPCFile
 			return Time;
 		}
 
-		/**
-		 * \brief Create a unique ID for a @link FIPCRequest
-		 */
-		static FORCEINLINE std::string GenerateUniqueRequestID() noexcept
-		{
-			const FToken UniqueIDToken = FToken::GenerateNewToken();
-			const std::string UniqueIDString = UniqueIDToken.ToString();
-			return UniqueIDString;
-		}
-
 	private:
-		inline static FGetRequestBuffer	<ERequestBufferType::UE>	UE_GetRequestBuffer;
-		inline static FWriteBufferThread<ERequestBufferType::UE>	UE_GetWriteThread;
+		inline static FGetRequestBuffer			<ERequestBufferType::UE>		UE_GetRequestBuffer;
+		inline static FWriteBufferThread		<ERequestBufferType::UE>		UE_GetWriteThread;
 
-		inline static FSetRequestBuffer	<ERequestBufferType::UE>	UE_SetRequestBuffer;
-		inline static FWriteBufferThread<ERequestBufferType::UE>	UE_SetWriteThread;
-		inline static FReadBufferThread	<ERequestBufferType::UE>	UE_SetReadThread;
+		inline static FSetRequestBuffer			<ERequestBufferType::UE>		UE_SetRequestBuffer;
+		inline static FWriteBufferThread		<ERequestBufferType::UE>		UE_SetWriteThread;
+		inline static FReadBufferThread			<ERequestBufferType::UE>		UE_SetReadThread;
 
-		inline static FGetRequestBuffer <ERequestBufferType::UE>	UE_GetPendingRequestsBuffer;
-		inline static FReadBufferThread <ERequestBufferType::UE>	UE_GetPendingThread;
+		inline static FPendingGetRequestBuffer	<ERequestBufferType::UE>		UE_GetPendingRequestsBuffer;
+		inline static FReadBufferThread			<ERequestBufferType::UE>		UE_GetPendingThread;
 		
-		inline static FSetRequestBuffer	<ERequestBufferType::AWS>	AWS_SetRequestBuffer;
-		inline static FWriteBufferThread<ERequestBufferType::AWS>	AWS_SetWriteThread;
-		inline static FReadBufferThread	<ERequestBufferType::AWS>	AWS_SetReadThread;
-		inline static FReadBufferThread	<ERequestBufferType::AWS>	AWS_GetReadThread;
+		inline static FSetRequestBuffer			<ERequestBufferType::AWS>		AWS_SetRequestBuffer;
+		inline static FWriteBufferThread		<ERequestBufferType::AWS>		AWS_SetWriteThread;
+		inline static FReadBufferThread			<ERequestBufferType::AWS>		AWS_SetReadThread;
+		inline static FReadBufferThread			<ERequestBufferType::AWS>		AWS_GetReadThread;
 	};
 }
 
