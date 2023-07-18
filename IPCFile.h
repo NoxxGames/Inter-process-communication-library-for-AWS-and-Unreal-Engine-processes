@@ -632,7 +632,7 @@ namespace IPCFile
 		FPendingGetRequest() = default;
 		FPendingGetRequest(const FPendingGetRequest& InRequest)
 			: FGetRequest(InRequest.GetPlayerAuthID(), InRequest.GetRequestID()),
-			UniqueID(InRequest.GetUniqueID())
+			UniqueID(InRequest.GetUniqueID()) 
 		{
 		}
 
@@ -760,13 +760,12 @@ namespace IPCFile
 			 * \param LambdaFunctor The functor to run
 			 * \return TODO this always returns true...
 			 */
-			FORCEINLINE bool RunLambdaThroughLock(
-				std::function<void()>& LambdaFunctor)
+			FORCEINLINE void RunLambdaThroughLock(
+				std::function<void()> LambdaFunctor)
 			{
 				Lock();
 				LambdaFunctor();
 				Unlock();
-				return true;
 			}
 			
 			/*
@@ -908,7 +907,7 @@ namespace IPCFile
 				BufferSize.fetch_sub(1, std::memory_order_acq_rel);
 				BufferLock.RunLambdaThroughLock([=]()
 				{
-					RequestBuffer.erase(Index);
+					// RequestBuffer.erase(Index); TODO
 				});
 				return true;
 			}
@@ -918,7 +917,7 @@ namespace IPCFile
 			 */
 			virtual FORCEINLINE void Clear()
 			{
-				BufferLock.RunLambdaThroughLock([=]()
+				BufferLock.RunLambdaThroughLock([=]() -> void
 				{
 					RequestBuffer.clear();
 					RequestBuffer.reserve(ReserveSize.load(std::memory_order_relaxed));
@@ -949,9 +948,9 @@ namespace IPCFile
 			 * \brief Runs a given functor that will be protected by the @link FSpinLoop lock.
 			 * \param Lambda Lambda functor to be run through the lock.
 			 */
-			virtual FORCEINLINE bool RunLambdaThroughLock(std::function<void()>& Lambda)
+			virtual FORCEINLINE void RunLambdaThroughLock(std::function<void()> Lambda)
 			{
-				return BufferLock.RunLambdaThroughLock(Lambda);
+				BufferLock.RunLambdaThroughLock(Lambda);
 			}
 			
 		protected:
@@ -989,10 +988,10 @@ namespace IPCFile
 			 * \brief Write all the current @link FGetRequest in this buffer to a specified file location.
 			 * \param FileLocation The directory to write the file to.
 			 */
-			FORCEINLINE bool WriteGetRequestsToFileThroughLock(
+			FORCEINLINE void WriteGetRequestsToFileThroughLock(
 				const std::string& FileLocation)
 			{
-				return this->RunLambdaThroughLock([=]() -> bool
+				this->RunLambdaThroughLock([=]()
 				{
 					std::string CompleteFileString = "";
 					for(int i = 0; i < this->Size(); ++i)
@@ -1034,30 +1033,27 @@ namespace IPCFile
 					GeneratorUniqueFileName(UniqueFileName, ERequestType::GET);
 					if(UniqueFileName == NULL_STRING)
 					{
-						return false;
+						return;
 					}
 					
 					const std::string FullNameAndPath = FileLocation +
 						FILE_DIRECTORY_DELIM + UniqueFileName + FILE_EXTENSION;
 								
-					return WriteStringToFile(FullNameAndPath, CompleteFileString);
+					WriteStringToFile(FullNameAndPath, CompleteFileString);
 				});
-			}
-
-			FORCEINLINE bool DoProtectedWorkWithPendingGetRequestIDs(
-				const std::function<void()>& Functor)
-			{
-				return this->RunLambdaThroughLock(Functor);
 			}
 		};
 
+		/**
+		 * TODO
+		 */
 		template<ERequestBufferType TBufferPlatform>
 		class IPC_ALIGN_TO_CACHE_LINE FPendingGetRequestBuffer final
 			: public FRequestBuffer<FPendingGetRequest, TBufferPlatform>
 		{
 		public:
 			FPendingGetRequestBuffer()
-				: FRequestBuffer<std::string, TBufferPlatform>()
+				: FRequestBuffer<FPendingGetRequest, TBufferPlatform>()
 			{
 			}
 
@@ -1068,7 +1064,10 @@ namespace IPCFile
 			{
 				FPendingGetRequestBuffer();
 			}
-
+			
+			/**
+			 * TODO
+			 */
 			FPendingGetRequest operator[](const int Index)
 			{
 				FPendingGetRequest Out;
@@ -1078,7 +1077,10 @@ namespace IPCFile
 				});
 				return Out;
 			}
-
+			
+			/**
+			 * TODO
+			 */
 			FORCEINLINE bool RemoveElement(const uint32_t Index)
 			{
 				return this->RemoveIndex(Index);
@@ -1111,10 +1113,10 @@ namespace IPCFile
 			 * \brief Write all the current @link FSetRequest in this buffer to a specified file location.
 			 * \param FileLocation The directory to write the file to.
 			 */
-			FORCEINLINE bool WriteSetRequestsToFileThroughLock(
+			FORCEINLINE void WriteSetRequestsToFileThroughLock(
 				const std::string& FileLocation)
 			{
-				return this->RunLambdaThroughLock([=]() -> bool
+				this->RunLambdaThroughLock((std::function<void()>&)[=]() -> void
 				{
 					std::string CompleteFileString = "";
 					for(int i = 0; i < this->Size(); ++i)
@@ -1165,13 +1167,13 @@ namespace IPCFile
 					GeneratorUniqueFileName(UniqueFileName, ERequestType::SET);
 					if(UniqueFileName == NULL_STRING)
 					{
-						return false;
+						return;
 					}
 					
 					const std::string FullNameAndPath = FileLocation +
 						FILE_DIRECTORY_DELIM + UniqueFileName + FILE_EXTENSION;
 						
-					return WriteStringToFile(FullNameAndPath, CompleteFileString);
+					WriteStringToFile(FullNameAndPath, CompleteFileString);
 				});
 			}
 		};
@@ -1389,8 +1391,9 @@ namespace IPCFile
 				return false;
 			}
 			
-			return UE_GetRequestBuffer.WriteGetRequestsToFileThroughLock(
+			UE_GetRequestBuffer.WriteGetRequestsToFileThroughLock(
 				FileLocation);
+			return true;
 		}
 
 		/**
@@ -1398,15 +1401,15 @@ namespace IPCFile
 		 * \param FileLocation The directory to put the file into
 		 * \return Whether or not the write worked
 		 */
-		static FORCEINLINE bool UE_WriteSetRequestBufferToFile(
+		static FORCEINLINE void UE_WriteSetRequestBufferToFile(
 			const std::string& FileLocation)
 		{
 			if(UE_SetRequestBuffer.IsEmpty())
 			{
-				return false;
+				return;
 			}
 
-			return UE_SetRequestBuffer.WriteSetRequestsToFileThroughLock(FileLocation);
+			UE_SetRequestBuffer.WriteSetRequestsToFileThroughLock(FileLocation);
 		}
 
 		/*
@@ -1479,14 +1482,14 @@ namespace IPCFile
 		 * \param FileLocation The directory to put the file into
 		 * \return Whether or not the write worked
 		 */
-		static FORCEINLINE bool AWS_WriteSetRequestBufferToFile(
+		static FORCEINLINE void AWS_WriteSetRequestBufferToFile(
 			const std::string& FileLocation)
 		{
 			if(AWS_SetRequestBuffer.IsEmpty())
 			{
-				return false;
+				return;
 			}
-			return AWS_SetRequestBuffer.WriteSetRequestsToFileThroughLock(FileLocation);
+			AWS_SetRequestBuffer.WriteSetRequestsToFileThroughLock(FileLocation);
 		}
 		
 		/*
