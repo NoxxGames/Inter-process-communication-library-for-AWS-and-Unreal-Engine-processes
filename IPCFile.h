@@ -178,7 +178,6 @@ namespace IPCFile
 			return Incrementor.fetch_add(1, std::memory_order_seq_cst);
 		}
 	
-
 	private:
 		uint64_t Token;
 		inline static std::atomic<uint64_t> Incrementor = {0};
@@ -293,7 +292,7 @@ namespace IPCFile
 		static const Internal::IColumnAttributeString TableKey_PlayerAuthID =
 			Internal::IColumnAttributeString(
 				EAttributeName::PLAYER_AUTH,
-				std::string("PlayerID"));
+				std::string("PlayerAuthID"));
 		
 		static const Internal::IColumnAttributeString TableKey_PlayerName =
 			Internal::IColumnAttributeString(
@@ -1116,47 +1115,52 @@ namespace IPCFile
 			FORCEINLINE void WriteSetRequestsToFileThroughLock(
 				const std::string& FileLocation)
 			{
-				this->RunLambdaThroughLock((std::function<void()>&)[=]() -> void
+				this->RunLambdaThroughLock([=]()
 				{
 					std::string CompleteFileString = "";
 					for(int i = 0; i < this->Size(); ++i)
 					{
 						const FSetRequest Request = this->RequestBuffer[i];
+						const FPlayerAttributeList PlayerAttributes =
+							Request.GetPlayerAttributeList();
 						std::string CurrentLine = "";
-						for(int j = 0; j < Request.Size(); ++j)
+						
+						for(int j = 0; j < PlayerAttributes.Size(); ++j)
 						{
-							const FPlayerAttributeList& PlayerAttributes =
-								Request.GetPlayerAttributeList();
-							
 							// Combine each attribute key and value into a string
 							// then append it to the line.
 							FAttributeStringPair StringPair;
 							for(int k = 0; k < PlayerAttributes.Size(); ++k)
 							{
-								if(PlayerAttributes[k] == TableKey_PlayerAuthID.Name)
+								switch(PlayerAttributes[k])
 								{
-									StringPair.KeyString = TableKey_PlayerAuthID.Key;
-									StringPair.ValueString =
-										PlayerAttributes.GetPlayerAuthID().Value;
+									case EAttributeName::NONE:
+										// it should never be this...
+										break;
+									case EAttributeName::PLAYER_AUTH:
+										StringPair.KeyString = TableKey_PlayerAuthID.Key;
+										StringPair.ValueString =
+											PlayerAttributes.GetPlayerAuthID().Value;
+										break;
+									case EAttributeName::PLAYER_NAME:
+										StringPair.KeyString = TableKey_PlayerName.Key;
+										StringPair.ValueString =
+											PlayerAttributes.GetPlayerName().Value;
+										break;
+									case EAttributeName::IS_ONLINE:
+										StringPair.KeyString = TableKey_IsOnline.Key;
+										StringPair.ValueString =
+											(PlayerAttributes.GetIsOnline().Value) ?
+												(TRUE_STRING) : (FALSE_STRING);
+										break;
+									default:
+										// should not be able to get here...
+										break;
 								}
-								else if(PlayerAttributes[k] == TableKey_PlayerName.Name)
-								{
-									StringPair.KeyString = TableKey_PlayerName.Key;
-									StringPair.ValueString =
-										PlayerAttributes.GetPlayerName().Value;
-								}
-								else if(PlayerAttributes[k] == TableKey_IsOnline.Name)
-								{
-									StringPair.KeyString = TableKey_IsOnline.Key;
-									StringPair.ValueString =
-										(PlayerAttributes.GetIsOnline().Value) ?
-											(TRUE_STRING) : (FALSE_STRING);
-								}
+								const std::string AttributeString = StringPair.KeyString +
+									ATTRIBUTE_DELIM_CHAR + StringPair.ValueString + DELIM_CHAR;
+								CurrentLine.append(AttributeString);
 							}
-							
-							const std::string AttributeString = StringPair.KeyString +
-								ATTRIBUTE_DELIM_CHAR + StringPair.ValueString + DELIM_CHAR;
-							CurrentLine.append(AttributeString);
 						}
 						CurrentLine += NEWLINE_CHAR;
 						CompleteFileString.append(CurrentLine);
@@ -1169,7 +1173,6 @@ namespace IPCFile
 					{
 						return;
 					}
-					
 					const std::string FullNameAndPath = FileLocation +
 						FILE_DIRECTORY_DELIM + UniqueFileName + FILE_EXTENSION;
 						
@@ -1409,7 +1412,8 @@ namespace IPCFile
 				return;
 			}
 
-			UE_SetRequestBuffer.WriteSetRequestsToFileThroughLock(FileLocation);
+			UE_SetRequestBuffer.WriteSetRequestsToFileThroughLock(
+				FileLocation);
 		}
 
 		/*
